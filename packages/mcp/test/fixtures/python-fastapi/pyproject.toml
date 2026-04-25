@@ -1,0 +1,8 @@
+[project]
+name = "billing-api"
+version = "0.0.0"
+dependencies = [
+  "fastapi>=0.100",
+  "pydantic>=2",
+  "sqlalchemy>=2",
+]
