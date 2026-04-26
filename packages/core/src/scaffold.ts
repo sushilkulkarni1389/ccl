@@ -108,6 +108,9 @@ export interface ExecuteOptions {
     index: number,
     total: number,
   ) => void;
+  conversationStep?: string;
+  guidedAnswers?: Record<string, string>;
+  planOverrides?: Record<string, unknown>;
 }
 
 export type GitRunner = (args: string[], cwd: string) => Promise<number>;
@@ -717,6 +720,15 @@ export async function executeScaffoldPlan(
       gitSync: plan.gitSync,
       now: new Date(startedAt),
     }),
+    ...(opts.conversationStep !== undefined
+      ? { conversationStep: opts.conversationStep }
+      : { conversationStep: "scaffolding" }),
+    ...(opts.guidedAnswers !== undefined
+      ? { guidedAnswers: opts.guidedAnswers }
+      : {}),
+    ...(opts.planOverrides !== undefined
+      ? { planOverrides: opts.planOverrides }
+      : {}),
   };
 
   await mkdir(join(plan.rootDir, ".claude"), { recursive: true });
@@ -794,6 +806,7 @@ export async function executeScaffoldPlan(
   const completedAt = nowFn().toISOString();
   state.status = "complete";
   state.completedAt = completedAt;
+  state.conversationStep = "complete";
   delete state.lastCompletedStep;
   delete state.remainingSteps;
   await writeFile(statePath, renderStateJson(state), "utf8");
@@ -1032,7 +1045,29 @@ function normalizeState(parsed: Record<string, unknown>): StateContext | null {
           ),
         }
       : {}),
+    ...(asString(parsed["conversation_step"]) !== undefined
+      ? { conversationStep: asString(parsed["conversation_step"])! }
+      : {}),
+    ...(isPlainObject(parsed["guided_answers"])
+      ? { guidedAnswers: asStringRecord(parsed["guided_answers"]) }
+      : {}),
+    ...(isPlainObject(parsed["plan_overrides"])
+      ? { planOverrides: parsed["plan_overrides"] as Record<string, unknown> }
+      : {}),
   };
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function asStringRecord(v: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!isPlainObject(v)) return out;
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val === "string") out[k] = val;
+  }
+  return out;
 }
 
 function asString(v: unknown): string | undefined {

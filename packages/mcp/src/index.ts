@@ -1,9 +1,10 @@
 // ────────────────────────────────────────────────────────────────────────────
 // Phase 6 — MCP server entry point.
-// Exposes a single `ccl` tool over stdio. Interactive prompts are backed by
-// MCP elicitation. If the connecting client does not advertise elicitation
-// support, the tool aborts with a clean error (logged + returned) rather than
-// hanging on the first ask/choose.
+// Exposes a single `ccl` tool over stdio. The tool accepts an optional
+// `input` string parameter; conversation state lives in
+// `.claude/ccl-state.json` (conversationStep / guidedAnswers / planOverrides).
+// CCL no longer uses MCP elicitation — every turn returns plain text and
+// the host echoes the user's reply back via the next tool call's input.
 // ────────────────────────────────────────────────────────────────────────────
 
 import { spawn } from "node:child_process";
@@ -11,6 +12,7 @@ import { spawn } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 import type { GitRunner, LlmCall } from "@ccl/core";
 
@@ -19,19 +21,20 @@ import {
   type CclAdapter,
   type CclRunResult,
 } from "./commands/ccl.js";
+import { resolveApiKey } from "./setup.js";
 
 // ────────────────────────────────────────────────────────────────────────────
-// User-facing strings (top-of-file, matching Phase 5 discipline)
+// User-facing strings
 // ────────────────────────────────────────────────────────────────────────────
 
 const SERVER_NAME = "ccl";
 const SERVER_VERSION = "0.0.0";
 const TOOL_NAME = "ccl";
 const TOOL_DESCRIPTION =
-  "Scaffold a production-ready Claude Code project in the current directory. Interactive — requires an MCP client with elicitation support.";
+  "Scaffold a production-ready Claude Code project. Pass user replies via the optional `input` parameter; CCL tracks conversation state across calls in .claude/ccl-state.json.";
 
 const LLM_MODEL = "claude-sonnet-4-6";
-const LLM_MAX_TOKENS = 4096;
+const LLM_MAX_TOKENS = 1000;
 
 const MIN_NODE_MAJOR = 18;
 
@@ -40,23 +43,21 @@ const ERR_NODE_TOO_OLD = (major: number): string =>
 
 const ERR_STARTUP_FAILED = "CCL MCP server failed to start";
 
-const ERR_NO_ELICITATION =
-  "This MCP client does not advertise elicitation support. CCL needs an elicitation-capable client (e.g. Claude Code) to ask interactive questions. Tool call aborted — no files were written.";
-
-const ERR_NO_API_KEY =
-  "ANTHROPIC_API_KEY is not set in the server environment. CCL uses the Anthropic API for skill classification and generation. Set ANTHROPIC_API_KEY and retry.";
-
-const ERR_USER_CANCELLED =
-  "User cancelled or declined an elicitation prompt — CCL stopped cleanly. No files were written beyond steps already completed before cancellation.";
-
-const ERR_ELICITATION_SHAPE =
-  "Elicitation response did not match the expected shape.";
-
 const ELICIT_PROMPT_TRUNCATE = 80;
 const ELICIT_RESPONSE_TRUNCATE = 120;
 
 const truncate = (s: string, n: number): string =>
   s.length <= n ? s : s.slice(0, n) + "…";
+
+export function scrubSecrets(text: string): string {
+  let out = text;
+  out = out.replace(/sk-ant-[A-Za-z0-9_\-]{20,}/g, "[REDACTED]");
+  out = out.replace(/[A-Za-z0-9+/]{40,}={0,2}/g, "[REDACTED]");
+  out = out.replace(/[0-9a-fA-F]{40,}/g, "[REDACTED]");
+  out = out.replace(/bearer\s+\S{20,}/gi, "[REDACTED]");
+  out = out.replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED]");
+  return out;
+}
 
 const STATUS_LABELS: Record<CclRunResult["status"], string> = {
   complete: "✅ CCL scaffold complete.",
@@ -64,25 +65,97 @@ const STATUS_LABELS: Record<CclRunResult["status"], string> = {
   "refresh-only": "Best practices refresh completed.",
   resumed: "Resumed scaffold — finished.",
   skipped: "Scaffold skipped.",
+  awaiting_input: "",
 };
+
+// `parseChoice` maps the user's free-text input onto the integer choice
+// space the CclAdapter.choose contract still uses. The state machine in
+// ccl.ts mostly inspects the input string directly, but a few code paths
+// still go through choose() — keep parsing aligned with the v1.3 hints
+// ("Type 1 or 2", "Type yes or no", "refresh / later / never").
+export function parseChoice(input: string, optCount: number): number {
+  const t = input.trim().toLowerCase();
+  if (!t) return -1;
+  const n = Number.parseInt(t, 10);
+  if (!Number.isNaN(n) && n >= 1 && n <= optCount) return n - 1;
+  if (t === "yes" || t === "y") return 0;
+  if (t === "no" || t === "n") return 1;
+  if (t === "refresh" || t === "accept") return 0;
+  if (t === "later") return 1;
+  if (t === "never") return 2;
+  if (t === "review") return 2;
+  if (t === "retry") return 0;
+  if (t === "skip") return 1;
+  return -1;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // LLM + git wrappers
 // ────────────────────────────────────────────────────────────────────────────
 
-function buildAnthropicLlmCall(client: Anthropic): LlmCall {
-  return async (prompt, systemPrompt) => {
-    const response = await client.messages.create({
-      model: LLM_MODEL,
-      max_tokens: LLM_MAX_TOKENS,
-      ...(systemPrompt !== undefined ? { system: systemPrompt } : {}),
-      messages: [{ role: "user", content: prompt }],
-    });
-    const parts: string[] = [];
-    for (const block of response.content) {
-      if (block.type === "text") parts.push(block.text);
+type AnthropicCtor = new (
+  opts: ConstructorParameters<typeof Anthropic>[0],
+) => Anthropic;
+
+export function buildLlmCall(
+  key: string | undefined,
+  AnthropicCtorOverride?: AnthropicCtor,
+): LlmCall | undefined {
+  if (!key) return undefined;
+  const Ctor = AnthropicCtorOverride ?? Anthropic;
+  const client = new Ctor({ apiKey: key });
+  return async (prompt: string, systemPrompt?: string): Promise<string> => {
+    try {
+      const res = await client.messages.create({
+        model: LLM_MODEL,
+        max_tokens: LLM_MAX_TOKENS,
+        ...(systemPrompt !== undefined ? { system: systemPrompt } : {}),
+        messages: [{ role: "user", content: prompt }],
+      });
+      const block = res.content[0];
+      if (!block || block.type !== "text" || !block.text) {
+        throw new Error("CCL: empty response from Anthropic API");
+      }
+      return block.text;
+    } catch (err: unknown) {
+      const e = err as { status?: number; message?: string };
+      if (e.status === 401) {
+        throw new Error(
+          "CCL_ERR_KEY_INVALID: Your ANTHROPIC_API_KEY is invalid or " +
+            "expired. Run: npx ccl --set-key <new-key>",
+        );
+      }
+      if (e.status === 403) {
+        throw new Error(
+          "CCL_ERR_KEY_FORBIDDEN: Your ANTHROPIC_API_KEY does not have " +
+            "permission to call this model. Check your Anthropic plan.",
+        );
+      }
+      if (e.status === 429) {
+        throw new Error(
+          "CCL_ERR_RATE_LIMITED: Anthropic API rate limit reached. " +
+            "Wait a moment and try again.",
+        );
+      }
+      if (e.status && e.status >= 500) {
+        throw new Error(
+          "CCL_ERR_API_DOWN: Anthropic API returned " +
+            e.status +
+            ". Try again in a few minutes.",
+        );
+      }
+      if (
+        e.message?.includes("ENOTFOUND") ||
+        e.message?.includes("ECONNREFUSED") ||
+        e.message?.includes("network")
+      ) {
+        throw new Error(
+          "CCL_ERR_NETWORK: Could not reach Anthropic API. " +
+            "Check your internet connection.",
+        );
+      }
+      throw err;
     }
-    return parts.join("");
   };
 }
 
@@ -94,17 +167,21 @@ const spawnGit: GitRunner = (args, cwd) =>
   });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Adapter — wires MCP primitives (elicitation + logging) to CclAdapter.
+// Adapter — wires MCP logging + user input forwarding to CclAdapter.
+// `ask` and `choose` no longer block on elicitation; they return the
+// caller-supplied `input` value (parsed for `choose`).
 // ────────────────────────────────────────────────────────────────────────────
 
 interface AdapterOptions {
   mcpServer: McpServer;
-  llmCall: LlmCall;
+  llmCall: LlmCall | undefined;
   transcript: string[];
+  input: string;
 }
 
 function buildMcpAdapter(opts: AdapterOptions): CclAdapter {
   const s = opts.mcpServer.server;
+  const userInput = opts.input;
 
   const say = async (message: string): Promise<void> => {
     opts.transcript.push(message);
@@ -116,63 +193,32 @@ function buildMcpAdapter(opts: AdapterOptions): CclAdapter {
     }
   };
 
+  // The audit trail logs the prompt CCL emitted and the (scrubbed) reply
+  // the host forwarded back. The same `[ccl:elicit]` prefix is retained
+  // for log-grep continuity with v1.2 deployments and SECURITY.md.
   const ask = async (message: string): Promise<string> => {
-    const result = await s.elicitInput({
-      message,
-      requestedSchema: {
-        type: "object",
-        properties: {
-          value: {
-            type: "string",
-            description: message,
-          },
-        },
-        required: ["value"],
-      },
-    });
-    if (result.action !== "accept") throw new Error(ERR_USER_CANCELLED);
-    const val = result.content?.["value"];
-    if (typeof val !== "string") throw new Error(ERR_ELICITATION_SHAPE);
     try {
       await s.sendLoggingMessage({
         level: "info",
-        data: `[ccl:elicit] ask | prompt="${truncate(message, ELICIT_PROMPT_TRUNCATE)}" | response="${truncate(val, ELICIT_RESPONSE_TRUNCATE)}"`,
+        data: `[ccl:elicit] ask | prompt="${truncate(message, ELICIT_PROMPT_TRUNCATE)}" | response="${truncate(scrubSecrets(userInput), ELICIT_RESPONSE_TRUNCATE)}"`,
       });
     } catch {
       // Client may not implement logging — audit log is best-effort.
     }
-    return val;
+    return userInput;
   };
 
-  const choose = async (message: string, options: string[]): Promise<number> => {
-    const enumValues = options.map((_, i) => String(i));
-    const result = await s.elicitInput({
-      message,
-      requestedSchema: {
-        type: "object",
-        properties: {
-          choice: {
-            type: "string",
-            description: message,
-            enum: enumValues,
-            enumNames: options,
-          },
-        },
-        required: ["choice"],
-      },
-    });
-    if (result.action !== "accept") throw new Error(ERR_USER_CANCELLED);
-    const raw = result.content?.["choice"];
-    if (typeof raw !== "string") throw new Error(ERR_ELICITATION_SHAPE);
-    const n = Number.parseInt(raw, 10);
-    if (Number.isNaN(n) || n < 0 || n >= options.length) {
-      throw new Error(ERR_ELICITATION_SHAPE);
-    }
-    const chosenLabel = options[n] ?? "";
+  const choose = async (
+    message: string,
+    options: string[],
+  ): Promise<number> => {
+    const n = parseChoice(userInput, options.length);
     try {
+      const chosenLabel =
+        n >= 0 && n < options.length ? options[n] ?? "" : "(invalid)";
       await s.sendLoggingMessage({
         level: "info",
-        data: `[ccl:elicit] choose | prompt="${truncate(message, ELICIT_PROMPT_TRUNCATE)}" | chosen="${chosenLabel}"`,
+        data: `[ccl:elicit] choose | prompt="${truncate(message, ELICIT_PROMPT_TRUNCATE)}" | chosen="${scrubSecrets(String(chosenLabel))}"`,
       });
     } catch {
       // Client may not implement logging — audit log is best-effort.
@@ -185,7 +231,7 @@ function buildMcpAdapter(opts: AdapterOptions): CclAdapter {
     ask,
     choose,
     say,
-    llmCall: opts.llmCall,
+    ...(opts.llmCall !== undefined ? { llmCall: opts.llmCall } : {}),
     now: () => new Date(),
     runGitCommand: spawnGit,
     initGit: true,
@@ -196,44 +242,27 @@ function buildMcpAdapter(opts: AdapterOptions): CclAdapter {
 // Tool handler
 // ────────────────────────────────────────────────────────────────────────────
 
-async function handleCclTool(mcpServer: McpServer) {
-  const caps = mcpServer.server.getClientCapabilities();
-  if (!caps?.elicitation) {
-    try {
-      await mcpServer.server.sendLoggingMessage({
-        level: "error",
-        data: ERR_NO_ELICITATION,
-      });
-    } catch {
-      // Ignore — we still return the error via the tool response below.
-    }
-    return {
-      content: [{ type: "text" as const, text: ERR_NO_ELICITATION }],
-      isError: true,
-    };
-  }
-
-  const apiKey = process.env["ANTHROPIC_API_KEY"];
-  if (!apiKey) {
-    return {
-      content: [{ type: "text" as const, text: ERR_NO_API_KEY }],
-      isError: true,
-    };
-  }
-
-  const client = new Anthropic({ apiKey });
+async function handleCclTool(mcpServer: McpServer, input?: string) {
+  const apiKey = await resolveApiKey();
+  const llmCall = buildLlmCall(apiKey);
   const transcript: string[] = [];
   const adapter = buildMcpAdapter({
     mcpServer,
-    llmCall: buildAnthropicLlmCall(client),
+    llmCall,
     transcript,
+    input: input ?? "",
   });
 
   try {
-    const result = await runCcl(adapter);
+    const result = await runCcl(adapter, input);
     const summary = STATUS_LABELS[result.status];
     const body = transcript.join("\n\n");
-    const text = body.length > 0 ? `${body}\n\n${summary}` : summary;
+    const text =
+      summary.length > 0
+        ? body.length > 0
+          ? `${body}\n\n${summary}`
+          : summary
+        : body;
     return { content: [{ type: "text" as const, text }] };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -272,6 +301,7 @@ export async function main(): Promise<void> {
     TOOL_NAME,
     {
       description: TOOL_DESCRIPTION,
+      inputSchema: { input: z.string().optional() },
       annotations: {
         title: "Claude Context Loader",
         readOnlyHint: false,
@@ -279,15 +309,17 @@ export async function main(): Promise<void> {
         idempotentHint: false,
       },
     },
-    async () => handleCclTool(server),
+    async ({ input }) => handleCclTool(server, input),
   );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  process.stderr.write(`${ERR_STARTUP_FAILED}: ${message}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`${ERR_STARTUP_FAILED}: ${message}\n`);
+    process.exit(1);
+  });
+}

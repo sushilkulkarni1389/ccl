@@ -3,6 +3,7 @@ import { join, basename } from "node:path";
 import * as toml from "smol-toml";
 import * as yaml from "yaml";
 
+import { validateScaffoldOverrides } from "./override-validator.js";
 import type {
   DirectoryEntry,
   ProjectCommands,
@@ -599,7 +600,7 @@ export async function detectProject(
     throw new Error(`detectProject: directory does not exist: ${rootDir}`);
   }
 
-  const [pkg, py, go, rust, dart, hasTsconfig, readmeSnippet, ccl, ciConfig, extraMonorepo] =
+  const [pkg, py, go, rust, dart, hasTsconfig, rawReadmeSnippet, ccl, ciConfig, extraMonorepo] =
     await Promise.all([
       readPackageJson(rootDir),
       readPyproject(rootDir),
@@ -612,6 +613,20 @@ export async function detectProject(
       detectCiConfig(rootDir),
       detectMonorepoMarker(rootDir),
     ]);
+
+  // Sanitize the README snippet via the same boundary that guards LLM-supplied
+  // ScaffoldOverrides — the snippet flows into CLAUDE.md, so untrusted README
+  // content must not bypass that filter. If sanitization strips the field or
+  // the validator throws, surface "" rather than the raw input.
+  let readmeSnippet: string | null = null;
+  if (rawReadmeSnippet !== null) {
+    try {
+      const result = validateScaffoldOverrides({ whatIsThis: rawReadmeSnippet });
+      readmeSnippet = result.overrides.whatIsThis ?? "";
+    } catch {
+      readmeSnippet = "";
+    }
+  }
 
   const manifests: Manifests = { pkg, py, go, rust, dart };
   const goVersion = go ? await readGoVersion(rootDir) : null;

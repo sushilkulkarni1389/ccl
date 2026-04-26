@@ -12,6 +12,9 @@ export function renderStateJson(ctx: StateContext): string {
     project_type: ctx.projectType,
     steps: ctx.steps.map((s) => ({ name: s.name, status: s.status })),
     git_sync: ctx.gitSync,
+    conversation_step: ctx.conversationStep ?? "greeting",
+    guided_answers: ctx.guidedAnswers ?? {},
+    plan_overrides: ctx.planOverrides ?? {},
   };
   if (ctx.status !== "complete") {
     if (ctx.lastCompletedStep !== undefined) {

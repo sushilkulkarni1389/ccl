@@ -19,6 +19,8 @@
 
 [![CCL Demo](https://placehold.co/1280x720/0a0a0a/ffffff?text=▶+Demo+Video+Coming+Soon)](https://github.com/your-org/ccl)
 
+🌐 [Website](https://your-org.github.io/ccl)
+
 ---
 
 ## What is CCL?
@@ -76,7 +78,7 @@ CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx
 
 ## Quick Start
 
-**Requirements:** Node.js 18+ · Claude Code
+**Requirements:** Node.js 18+ · Claude Code · API key storage uses the OS keychain (macOS Keychain, Windows Credential Vault, libsecret on Linux). On Linux, install libsecret-1-dev before running npx ccl.
 
 ```bash
 # 1. Register CCL as an MCP server (one time only)
@@ -94,7 +96,40 @@ CCL will guide you from there. No flags. No config. No docs to read first.
 
 ---
 
+## API Key (optional)
+
+CCL scaffolds everything without an API key — CLAUDE.md, skills,
+agents, settings, and hooks all work with static templates.
+
+An Anthropic API key unlocks:
+- AI-generated skill content tailored to your stack
+- Interactive plan changes ("make the deploy skill more cautious")
+
+Get a key at console.anthropic.com, then:
+
+```bash
+npx ccl --set-key sk-ant-...
+```
+
+To remove it later:
+
+```bash
+npx ccl --remove-key
+```
+
+The key is stored exclusively in your OS keychain (macOS Keychain,
+Windows Credential Vault, libsecret on Linux) — it never lands in
+`claude.json` or any other on-disk file. For CI or headless environments
+without a keychain, set `ANTHROPIC_API_KEY` in the environment instead.
+Restart Claude Code after any key change.
+
+---
+
 ## How It Works
+
+### How you respond
+
+CCL outputs plain text and reads your next response as input — no dialog boxes, no timeouts. Type your answer in the Claude Code prompt and call /ccl again.
 
 ### Two ways to start
 
@@ -207,6 +242,17 @@ Dangerous commands are blocked at the permission level:
 
 See [SECURITY.md](SECURITY.md) for the full trust boundary model.
 
+### Secret protection
+
+CCL stores your Anthropic API key exclusively in the OS keychain (macOS Keychain, Windows Credential Vault, libsecret on Linux) — never in `claude.json`. Set it once with:
+
+```bash
+npx ccl --set-key sk-ant-...
+npx ccl --remove-key        # to remove it later
+```
+
+All elicitation responses are scrubbed for high-entropy strings and known secret patterns before they are written to the MCP audit log.
+
 ---
 
 ## Best Practices: Self-Updating
@@ -239,8 +285,9 @@ If a scaffold is interrupted, CCL detects it on the next `/ccl` and offers to co
 Last completed step: skills/deploy
 Remaining: agents/security-auditor, settings.json
 
-  [1] Continue from where I left off
-  [2] Start again from scratch
+[1] Continue from where I left off
+[2] Start again from scratch
+Type 1 or 2 to continue.
 ```
 
 All writes are atomic and idempotent — resuming re-executes the full plan, and already-written files are overwritten with identical content.
@@ -258,8 +305,9 @@ If CCL finds `.claude/` or `CLAUDE.md` already present:
   .claude/              ✓ exists
   ccl-practices.json    ✓ exists (v1.2, last updated 3 days ago)
 
-  [1] Re-scaffold — Start fresh. All existing CCL files will be overwritten.
-  [2] Skip — Leave everything as-is and exit.
+[1] Re-scaffold — Start fresh. All existing CCL files will be overwritten.
+[2] Skip — Leave everything as-is and exit.
+Type 1 or 2 to continue.
 ```
 
 ---
@@ -303,9 +351,34 @@ ccl/
 
 ---
 
+## CI / Quality Gates
+
+Every pull request runs the following gates in order:
+
+| Gate | Tool | Blocks on |
+|---|---|---|
+| Secret scanning | gitleaks | Any committed secret in full history |
+| Shell injection | semgrep | exec/shell:true patterns in packages/ |
+| Dependency audit | npm audit | Any CVE at moderate severity or above |
+| Typecheck | tsc --strict | Any type error |
+| Tests | tsx --test | Any failing assertion (currently 264) |
+
+Run them locally:
+
+```bash
+npm ci
+npm run typecheck
+cd packages/core && npx tsx --test test/*.test.ts
+cd packages/mcp  && npx tsx --test test/*.test.ts
+```
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The build sequence is documented in the blueprint — build `core/templates` first, then `detector`, `scaffold`, `practices`, and finally the MCP layer.
+
+The lock file (`package-lock.json`) is committed to the repo — always run `npm ci` rather than `npm install` to reproduce the exact dependency tree.
 
 ---
 

@@ -1,0 +1,17 @@
+rules:
+  - id: no-shell-exec
+    patterns:
+      - pattern-either:
+          - pattern: child_process.exec($CMD, ...)
+          - pattern: child_process.execSync($CMD, ...)
+          - pattern: spawn($CMD, ..., {shell: true, ...})
+          - pattern: spawnSync($CMD, ..., {shell: true, ...})
+          - pattern: execa($CMD, {shell: true, ...})
+    message: >
+      Shell interpolation detected. Use execFile/spawn with an
+      array of arguments instead. See CONTRIBUTING.md §Security.
+    languages: [typescript, javascript]
+    severity: ERROR
+    paths:
+      include:
+        - packages/

@@ -110,6 +110,9 @@ export interface StateContext {
   gitSync: boolean;
   lastCompletedStep?: string;
   remainingSteps?: string[];
+  conversationStep?: string;
+  guidedAnswers?: Record<string, string>;
+  planOverrides?: Record<string, unknown>;
 }
 
 export interface GitignoreContext {

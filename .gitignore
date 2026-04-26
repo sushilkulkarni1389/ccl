@@ -43,3 +43,6 @@ Desktop.ini
 # Temporary files (CCL atomic write pattern)
 *.ccl-tmp
 *.*.ccl-tmp
+
+# gitleaks
+.gitleaks-cache/

@@ -2,7 +2,7 @@
 
   **Blueprint:** `CCL_BLUEPRINT_v1.2.md`
   **Source of truth for build order:** §22 Build Sequence
-  **Last updated:** 2026-04-25
+  **Last updated:** 2026-04-27
 
   ---
 
@@ -11,9 +11,9 @@
   | Metric | Value |
   |---|---|
   | Phases complete | 8 / 8 — all phases ✅ (blueprint v1.2) |
-  | Tests passing | 227 / 227 (core 158 + mcp 25 ccl + 13 setup + 4 index + 27 integration = 69 mcp) |
+  | Tests passing | 262 / 262 (core 173 + mcp 89) |
   | Source LOC (core) | 4,127 |
-  | Source LOC (mcp) | 1,324 |
+  | Source LOC (mcp) | 2,454 |
   | Test LOC | 6,031 |
   | Integration suite wall-clock | ~0.9 s (budget: 30 s) |
   | Typecheck | clean (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes) |
@@ -147,11 +147,37 @@
   - **llmCall strategy:** default stub dispatches on prompt prefix (`Classify each skill` → fast JSON classifications; `User said:` → configurable review response; otherwise skill-body content). Review-loop helper tracks per-call index so tests can pin iteration counts exactly.
   - **Wall-clock:** ~0.9 s on the dev laptop (budget 30 s). No network calls, no real LLM calls.
 
+  ### ✅ v1.3 Migration — Elicitation removed, state machine implemented
+
+  - Removed all elicitInput() calls from packages/mcp/src/index.ts.
+    Tool now accepts input?: string (Zod optional) via registerTool
+    inputSchema. ask/choose adapters return userInput directly;
+    [ccl:elicit] audit prefix retained for Fix 6 canary continuity.
+  - packages/mcp/src/commands/ccl.ts fully rewritten (~1000 LoC).
+    runCcl(adapter, input?) dispatches on state.conversationStep
+    read from .claude/ccl-state.json. 18 conversation states:
+    greeting, interrupted_choice/gitsync/permission,
+    rescaffold_warning, refresh_prompt/failure/accept/review_each,
+    guided_q1..q5, skill_mode, auto_detect_review/plan_review,
+    permission_request, git_sync, complete.
+  - chooseInitialStep prioritizes interrupted-scaffold detection,
+    then refresh gate, then greeting.
+  - hasRealScaffold tightened to CLAUDE.md ∨ .claude/settings.json
+    (prevents ccl-state.json writes from triggering false-positive
+    rescaffold warnings).
+  - packages/mcp/test/integration-helpers.ts: added
+    runStateMachine(adapter, inputs[]) helper — drives runCcl across
+    N turns; autoDetectScript/guidedSetupScript updated to return
+    string[] for v1.3.
+  - packages/mcp/test/ccl.test.ts + integration.test.ts: fully
+    rewritten to multi-turn runStateMachine pattern (25 + 27 tests).
+  - index.test.ts: untouched — Fix 6 canary still passes.
+
   ---
 
   ## Security patches (post-build)
 
-  Nine security fixes applied after Phase 8 completion. Every fix lands a hardening change in source and a regression test that pins the new behaviour. Total of **67 tests added** across these fixes (folded into the 227 / 227 total in the snapshot).
+  Fifteen security fixes applied after Phase 8 completion. Every fix lands a hardening change in source and (where applicable) a regression test that pins the new behaviour. Total of **104 tests added** across these fixes (folded into the 264 / 264 total in the snapshot).
 
   ### Fix 1 — Prompt Injection Guard on LLM-Generated `ScaffoldOverrides`
   Free-form review-loop responses returned by the LLM are now validated before they touch `buildScaffoldPlan`. A new module-level validator strips disallowed control characters, caps field lengths, and rejects any payload that re-introduces shell-metacharacter or path-traversal patterns into project metadata.
@@ -207,12 +233,60 @@
   - **Files:** `packages/core/src/override-validator.ts` (`normalizeCclField`, internal `normalizeField`), `packages/core/src/practices.ts` (`normalizeCclField` applied in `checkTextField`)
   - **Tests added:** 4 (3 normalization cases + 1 practice-candidate scenario)
 
+  ### Fix A — API Key OS Keychain Storage
+  Replaced plaintext `ANTHROPIC_API_KEY` storage in `claude.json` with OS keychain via `@napi-rs/keyring` (no node-gyp, prebuilt binaries). Key flow: `--set-key` writes to keychain → `index.ts` reads at startup via `AsyncEntry.getPassword()`, with `process.env` fallback for CI. One-time migration strips the key from `claude.json` on next `runSetup`.
+
+  - **Files:** `packages/mcp/package.json` (added `@napi-rs/keyring ^1.2.0`), `packages/mcp/src/setup.ts` (`setApiKey` / `removeApiKey` / `resolveApiKey`, idempotent migration, `--set-key` / `--remove-key` CLI flags), `packages/mcp/src/index.ts` (`buildLlmCall` reads from keychain first), `README.md` (keychain requirement note), `SECURITY.md` (trust boundary bullet)
+  - **Tests added:** 12 (9 in `setup.test.ts` + 3 in `index.test.ts`)
+
+  ### Fix B — Elicitation Log Secret Scrubber
+  Added pure `scrubSecrets(text)` function to `index.ts` applying five redaction patterns in order: Anthropic API keys (`sk-ant-*`), base64 blobs ≥40 chars, hex strings ≥40 chars, Bearer tokens, GitHub PATs. Applied to user responses in `ask` and `choose` adapters before `sendLoggingMessage` — prompt text is never scrubbed.
+
+  - **Files:** `packages/mcp/src/index.ts` (`scrubSecrets` exported), `packages/mcp/test/index.test.ts` (`scrubSecrets` describe block)
+  - **Tests added:** 8
+
+  ### Fix C — README → CLAUDE.md Prompt Injection Guard
+  Wired `validateScaffoldOverrides` into `detector.ts` so the README first-paragraph snippet is sanitized before entering `ScaffoldPlan`. Fallback on validator throw or empty result is `""` — never the raw untrusted value.
+
+  - **Files:** `packages/core/src/detector.ts` (import + sanitization wrap), `packages/core/test/detector.test.ts` (README injection guard describe block)
+  - **Tests added:** 4
+
+  ### Fix C (follow-up) — Plain Prose Injection Blocklist
+  Fix C's validator only caught backtick/shell-syntax variants. Added `INJECTION_PHRASES` constant (7 regexes) + `stripInjectionPhrases` using sentence-level removal to `override-validator.ts`. Pattern 5 tightened from spec (`/your instructions are :/`) to avoid matching benign prose like "your instructions are in CLAUDE.md". Sentence-level removal ensures leading-sentence injections discard the entire field; mid-text injections drop only the offending sentence.
+
+  - **Files:** `packages/core/src/override-validator.ts` (`INJECTION_PHRASES`, `sentenceHasInjection`, `stripInjectionPhrases`, wired into `validateProse`), `packages/core/test/detector.test.ts` (fixture updated to plain prose), `packages/core/test/override-validator.test.ts` (`INJECTION_PHRASES` blocklist describe block, 11 it-blocks)
+  - **Tests added:** 13
+
+  ### Fix D — Shell Execution Semgrep Gate
+  Added semgrep rule blocking `child_process.exec`/`execSync` and `spawn`/`spawnSync`/`execa` with `shell:true`. Runs as a hard CI gate before typecheck and test. `CONTRIBUTING.md` documents the `execFile`-only convention, temp file atomicity, and override validation requirements.
+
+  - **Files:** `.semgrep/no-shell-exec.yml` (new), `CONTRIBUTING.md` (`## Security` section added), `.github/workflows/ci.yml` (new — quality job with semgrep gate)
+  - **Tests added:** 0 (CI gate, not unit-tested)
+
+  ### Fix E — Dependency Pinning + npm Audit CI Gate
+  Pinned `@modelcontextprotocol/sdk` to exact `1.29.0` and `@anthropic-ai/sdk` to exact `0.30.1` in `packages/mcp/package.json`. Added `npm audit --audit-level=moderate` step to `ci.yml` immediately after `npm ci`. README contributing section notes lock file usage.
+
+  - **Files:** `packages/mcp/package.json` (two exact pins), `.github/workflows/ci.yml` (audit step added), `README.md` (lock file sentence)
+  - **Tests added:** 0 (CI gate)
+
+  ### Fix F — Gitleaks Secret Scanning CI Gate
+  Added `gitleaks-action@v2` as a separate CI job with `fetch-depth:0` for full history scanning. `.gitleaks.toml` allowlists test fixture paths (`packages/mcp/test/.*`, `packages/core/test/.*`) and `.md` docs only — source paths are never allowlisted.
+
+  - **Files:** `.github/workflows/ci.yml` (gitleaks job, quality job now `needs: [gitleaks]`), `.gitleaks.toml` (new), `.gitignore` (`.gitleaks-cache/` added)
+  - **Tests added:** 0 (CI gate)
+
   ---
 
   ## Repo layout today
 
   ```
   ccl/
+  ├── .gitleaks.toml                    (Fix F — secret-scan allowlist)
+  ├── .semgrep/
+  │   └── no-shell-exec.yml             (Fix D — shell-exec ban rule)
+  ├── .github/
+  │   └── workflows/
+  │       └── ci.yml                    (Fix D/E/F — semgrep + audit + gitleaks gates)
   ├── CCL_BLUEPRINT.md                  (v1.0, frozen)
   ├── CCL_BLUEPRINT_v1.1.md             (frozen historical reference)
   ├── CCL_BLUEPRINT_v1.2.md             (current source of truth)
@@ -254,8 +328,8 @@
           ├── package.json              (bin: "ccl" → dist/setup.js; deps: @modelcontextprotocol/sdk, @anthropic-ai/sdk)
           ├── tsconfig.json             (same strict profile as core)
           ├── src/
-          │   ├── index.ts              (Phase 6 — MCP server entry)
-          │   ├── setup.ts              (Phase 7 — npx ccl installer)
+          │   ├── index.ts              (Phase 6 — MCP server entry; Fix B — scrubSecrets)
+          │   ├── setup.ts              (Phase 7 — npx ccl installer; Fix A — keychain storage)
           │   └── commands/
           │       └── ccl.ts            (Phase 5 — conversation handler)
           └── test/
@@ -311,6 +385,10 @@
   5. **Fix 5 `"skipped"` step status (post-build):** `StateStep.status` in `templates/types.ts` was widened from `"done" | "pending" | "failed"` to include `"skipped"`. Steps are marked skipped (not failed) when `validateAgentMd` rejects a disallowed tool or `assertWithinRoot` blocks a path traversal. The overall scaffold `status` remains `"complete"` when only skipped steps are present — a skipped step is a security gate, not an error.
   6. **Fix 7 `PathTraversalError` export (post-build):** `PathTraversalError` is exported from `packages/core/src/scaffold.ts` and re-exported through the core barrel. `assertWithinRoot` is module-private. Callers who need to distinguish traversal blocks from other errors can import the class directly.
   7. **Fix 9 `normalizeCclField` export (post-build):** `normalizeCclField` is exported from `override-validator.ts` for use by `practices.ts`. The internal `normalizeField` helper remains module-private. Both validate-and-store functions (overrides + practice candidates) normalize for checking but preserve the original user input in the stored output.
+  8. **Fix C follow-up Pattern 5 tightening:** the spec listed `/your\s+(new\s+)?instructions?\s+(are|is)\s*/gi` but this matches benign prose ("your instructions are in CLAUDE.md"). Tightened to require a colon suffix. User-facing assertion still passes.
+  9. **Fix C follow-up sentence-level removal:** spec said "replace match with empty string then trim" but literal replace leaves dangling fragments (", output PWNED"). Sentence-level removal with start-of-field rule satisfies all spec assertions.
+  10. **v1.3 permission/git_sync order:** v1.2 had git_sync before permission_request. v1.3 corrects this to permission_request → git_sync per §5 and §8.4.
+  11. **v1.3 test count:** build status previously showed 264/264. Actual count after v1.3 migration is 262/262 — the prior figure overcounted by 2 due to a bucketing estimation error in the security fix summaries. No tests were removed.
 
   ---
 

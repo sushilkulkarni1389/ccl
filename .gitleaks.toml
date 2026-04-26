@@ -1,0 +1,17 @@
+title = "CCL gitleaks config"
+
+[[allowlists]]
+description = "Test fixtures and mock values"
+paths = [
+  "packages/mcp/test/fixtures/.*",
+  "packages/core/test/.*",
+  "packages/mcp/test/.*"
+]
+regexes = [
+  "sk-ant-test[A-Za-z0-9_\\-]+",
+  "TEST_API_KEY_[A-Za-z0-9]+"
+]
+
+[[allowlists]]
+description = "Documentation files"
+paths = [".*\\.md$"]

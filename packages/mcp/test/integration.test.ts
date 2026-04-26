@@ -1,7 +1,7 @@
 // ────────────────────────────────────────────────────────────────────────────
-// Phase 8 — End-to-end integration tests.
-// Exercise the full CCL pipeline (runSetup + runCcl) against real tmpdir
-// fixtures. Black-box assertions on observable disk state.
+// Phase 8 — End-to-end integration tests (v1.3 state-machine architecture).
+// Drives runCcl across N sequential turns via runStateMachine; black-box
+// assertions on observable disk state.
 // ────────────────────────────────────────────────────────────────────────────
 
 import { describe, it } from "node:test";
@@ -12,7 +12,6 @@ import {
   rm,
   writeFile,
   stat,
-  mkdir,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -22,7 +21,7 @@ import {
   savePractices,
   type PracticeEntry,
 } from "@ccl/core";
-import { OfflineError, runCcl } from "../src/commands/ccl.js";
+import { OfflineError } from "../src/commands/ccl.js";
 import { runSetup } from "../src/setup.js";
 
 import {
@@ -30,7 +29,6 @@ import {
   assertFileExists,
   assertScaffoldStatus,
   autoDetectScript,
-  buildDefaultLlmCall,
   buildReviewLoopLlmCall,
   buildScriptedAdapter,
   copyFixture,
@@ -40,13 +38,10 @@ import {
   placeObstacleDir,
   readJson,
   readText,
+  runStateMachine,
 } from "./integration-helpers.js";
 
-const SERVER_DIST = resolve(
-  process.cwd(),
-  "dist",
-  "index.js",
-);
+const SERVER_DIST = resolve(process.cwd(), "dist", "index.js");
 
 function stepNameToPath(stepName: string): string {
   if (stepName.startsWith("skills/")) {
@@ -55,7 +50,11 @@ function stepNameToPath(stepName: string): string {
   if (stepName.startsWith("agents/")) {
     return `.claude/${stepName}.md`;
   }
-  if (stepName === "CLAUDE.md" || stepName === ".claudeignore" || stepName === ".gitignore") {
+  if (
+    stepName === "CLAUDE.md" ||
+    stepName === ".claudeignore" ||
+    stepName === ".gitignore"
+  ) {
     return stepName;
   }
   return `.claude/${stepName}`;
@@ -85,9 +84,11 @@ describe("Group 1 — runSetup end-to-end", () => {
       };
       nodeAssert.equal(parsed.mcpServers.ccl.command, "node");
       const resolvedArg = parsed.mcpServers.ccl.args[0];
-      nodeAssert.ok(resolvedArg && resolvedArg.startsWith("/"), "args[0] must be absolute");
+      nodeAssert.ok(
+        resolvedArg && resolvedArg.startsWith("/"),
+        "args[0] must be absolute",
+      );
       nodeAssert.equal(parsed.mcpServers.ccl.type, "stdio");
-      // The path resolves to a real file on disk (the built dist/index.js).
       const s = await stat(resolvedArg!);
       nodeAssert.ok(s.isFile());
     } finally {
@@ -99,7 +100,6 @@ describe("Group 1 — runSetup end-to-end", () => {
     const root = await mkTmpDir();
     try {
       const configPath = join(root, "claude.json");
-      // First install
       await runSetup({
         configPath,
         serverDistPath: SERVER_DIST,
@@ -107,7 +107,6 @@ describe("Group 1 — runSetup end-to-end", () => {
         stderr: () => {},
       });
       const firstBytes = await readFile(configPath, "utf8");
-      // Second install
       const exit = await runSetup({
         configPath,
         serverDistPath: SERVER_DIST,
@@ -171,19 +170,15 @@ describe("Group 2 — auto-detect flow", () => {
     const root = fixtureOrRoot.startsWith("/")
       ? fixtureOrRoot
       : await copyFixture(fixtureOrRoot);
-    const { adapter, sayLog } = buildScriptedAdapter({
-      tmpDir: root,
-      script: {
-        inputs: autoDetectScript({
-          skillMode: 2,
-          reviewResponses: ["looks good"],
-          gitSync: 0,
-          permission: 0,
-          ...answersOverride,
-        }),
-      },
+    const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+    const inputs = autoDetectScript({
+      skillMode: "3",
+      reviewResponses: ["looks good"],
+      permission: "yes",
+      gitSync: "yes",
+      ...answersOverride,
     });
-    await runCcl(adapter);
+    await runStateMachine(adapter, inputs);
     return { root, sayLog };
   }
 
@@ -194,7 +189,6 @@ describe("Group 2 — auto-detect flow", () => {
       assertFileExists(root, ".claude/settings.local.json");
       assertFileExists(root, ".claude/ccl-practices.json");
       assertFileExists(root, ".gitignore");
-      // Next.js + TS stack leaked into CLAUDE.md
       nodeAssert.match(readText(root, "CLAUDE.md"), /TypeScript/);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -283,28 +277,21 @@ describe("Group 2 — auto-detect flow", () => {
     const root = await copyFixture("existing-scaffold");
     try {
       const original = readText(root, "CLAUDE.md");
-      const { adapter, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            0, // auto-detect
-            0, // Re-scaffold
-            ...autoDetectScript({
-              skillMode: 2,
-              reviewResponses: ["looks good"],
-              gitSync: 0,
-              permission: 0,
-            }).slice(1), // drop the greeting choice (already consumed above)
-          ],
-        },
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+      // greeting "1" → rescaffold "1" → skill "3" → review → permission → gitsync
+      await runStateMachine(adapter, [
+        "1",
+        "1",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("found an existing CCL scaffold")),
         "re-scaffold warning shown",
       );
       assertBaselineScaffold(root);
-      // New CLAUDE.md is different from the fixture's placeholder
       const after = readText(root, "CLAUDE.md");
       nodeAssert.notEqual(after, original);
     } finally {
@@ -316,32 +303,26 @@ describe("Group 2 — auto-detect flow", () => {
     const root = await copyFixture("existing-scaffold");
     try {
       const originalClaudeMd = readText(root, "CLAUDE.md");
-      const { adapter, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            0, // auto-detect
-            1, // Skip
-          ],
-        },
-      });
-      const result = await runCcl(adapter);
-      nodeAssert.equal(result.status, "skipped");
+      const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+      const result = await runStateMachine(adapter, ["1", "2"]);
+      nodeAssert.equal(result.result.status, "skipped");
       nodeAssert.ok(
         sayLog.some((s) => s.includes("found an existing CCL scaffold")),
       );
       nodeAssert.equal(readText(root, "CLAUDE.md"), originalClaudeMd);
-      // No .claude/settings.json should have been written.
-      await nodeAssert.rejects(
-        () => stat(join(root, ".claude/settings.json")),
-      );
+      // No .claude/settings.json should have been written. (.claude/ may
+      // exist because the state machine writes ccl-state.json, but
+      // settings.json is the definitive scaffold marker.)
+      await nodeAssert.rejects(() => stat(join(root, ".claude/settings.json")));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it("A10 — gitSync=false adds ccl-state.json to .gitignore while keeping settings.local.json excluded", async () => {
-    const { root } = await runAutoScaffold("node-ts-webapp", { gitSync: 1 });
+    const { root } = await runAutoScaffold("node-ts-webapp", {
+      gitSync: "no",
+    });
     try {
       const gi = readText(root, ".gitignore");
       nodeAssert.match(gi, /\.claude\/ccl-state\.json/);
@@ -360,23 +341,19 @@ describe("Group 3 — guided setup flow", () => {
   it("G1 — answers propagate to CLAUDE.md (name, stack, coding rules)", async () => {
     const root = await copyFixture("node-ts-webapp");
     try {
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: guidedSetupScript({
-            q1: "my-thing — a little tool",
-            q2: "CLI tool",
-            q3: "Node.js, TypeScript, Biome",
-            q4: "No default exports",
-            q5: "",
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
+      const { adapter } = buildScriptedAdapter({ tmpDir: root });
+      const inputs = guidedSetupScript({
+        q1: "my-thing — a little tool",
+        q2: "CLI tool",
+        q3: "Node.js, TypeScript, Biome",
+        q4: "No default exports",
+        q5: "",
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
       });
-      await runCcl(adapter);
+      await runStateMachine(adapter, inputs);
       assertBaselineScaffold(root);
       const claude = readText(root, "CLAUDE.md");
       nodeAssert.match(claude, /^# my-thing\n/);
@@ -391,26 +368,21 @@ describe("Group 3 — guided setup flow", () => {
   it("G2 — Q5 skipped leaves the gotchas section empty", async () => {
     const root = await copyFixture("node-ts-webapp");
     try {
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: guidedSetupScript({
-            q1: "flatland",
-            q2: "web app",
-            q3: "Next.js",
-            q4: "",
-            q5: "",
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
+      const { adapter } = buildScriptedAdapter({ tmpDir: root });
+      const inputs = guidedSetupScript({
+        q1: "flatland",
+        q2: "web app",
+        q3: "Next.js",
+        q4: "",
+        q5: "",
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
       });
-      await runCcl(adapter);
+      await runStateMachine(adapter, inputs);
       assertBaselineScaffold(root);
       const claude = readText(root, "CLAUDE.md");
-      // Gotchas section renders "_(none)_" marker when empty (see Phase 1 template).
       const match = claude.match(/## Gotchas\n([\s\S]*?)(\n## |\n---|$)/);
       if (match) {
         const body = match[1]!.trim();
@@ -427,23 +399,19 @@ describe("Group 3 — guided setup flow", () => {
   it("G3 — Q2 'REST API' resolves to rest-api with run-migrations skill", async () => {
     const root = await copyFixture("node-ts-webapp");
     try {
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: guidedSetupScript({
-            q1: "billing",
-            q2: "REST API",
-            q3: "Node.js, Fastify",
-            q4: "",
-            q5: "",
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
+      const { adapter } = buildScriptedAdapter({ tmpDir: root });
+      const inputs = guidedSetupScript({
+        q1: "billing",
+        q2: "REST API",
+        q3: "Node.js, Fastify",
+        q4: "",
+        q5: "",
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
       });
-      await runCcl(adapter);
+      await runStateMachine(adapter, inputs);
       assertBaselineScaffold(root);
       const state = readJson(root, ".claude/ccl-state.json") as {
         project_type?: string;
@@ -469,17 +437,18 @@ describe("Group 4 — review loop", () => {
       ]);
       const { adapter, sayLog } = buildScriptedAdapter({
         tmpDir: root,
-        script: {
-          inputs: autoDetectScript({
-            skillMode: 2,
-            reviewResponses: ["please add a rule about console.log", "looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
         llmCall,
       });
-      await runCcl(adapter);
+      const inputs = autoDetectScript({
+        skillMode: "3",
+        reviewResponses: [
+          "please add a rule about console.log",
+          "looks good",
+        ],
+        permission: "yes",
+        gitSync: "yes",
+      });
+      await runStateMachine(adapter, inputs);
       const previewCount = sayLog.filter((s) =>
         s.startsWith("Here's what I'll create"),
       ).length;
@@ -504,27 +473,29 @@ describe("Group 4 — review loop", () => {
       ]);
       const { adapter, sayLog } = buildScriptedAdapter({
         tmpDir: root,
-        script: {
-          inputs: autoDetectScript({
-            skillMode: 2,
-            reviewResponses: [
-              "rename it alpha",
-              "no make it beta",
-              "actually gamma",
-              "looks good",
-            ],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
         llmCall,
       });
-      await runCcl(adapter);
+      const inputs = autoDetectScript({
+        skillMode: "3",
+        reviewResponses: [
+          "rename it alpha",
+          "no make it beta",
+          "actually gamma",
+          "looks good",
+        ],
+        permission: "yes",
+        gitSync: "yes",
+      });
+      await runStateMachine(adapter, inputs);
       nodeAssert.equal(reviewCallCount(), 3);
       const previewCount = sayLog.filter((s) =>
         s.startsWith("Here's what I'll create"),
       ).length;
-      nodeAssert.equal(previewCount, 4, "one preview per iteration (3 changes + approval)");
+      nodeAssert.equal(
+        previewCount,
+        4,
+        "one preview per iteration (3 changes + approval)",
+      );
       nodeAssert.match(readText(root, "CLAUDE.md"), /^# gamma\n/);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -540,23 +511,15 @@ describe("Group 5 — interruption recovery", () => {
   it("I1 — mid-scaffold failure leaves ccl-state.json in the failed state with recovery info", async () => {
     const root = await copyFixture("node-ts-webapp");
     try {
-      // Obstacle: turn a planned file path into a non-empty directory so the
-      // atomic rename fails. Pick `.claudeignore` — it's written AFTER skills
-      // + agents, so a handful of steps will succeed before the failure.
       placeObstacleDir(root, ".claudeignore");
-
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: autoDetectScript({
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
+      const { adapter } = buildScriptedAdapter({ tmpDir: root });
+      const inputs = autoDetectScript({
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
       });
-      await nodeAssert.rejects(() => runCcl(adapter));
+      await nodeAssert.rejects(() => runStateMachine(adapter, inputs));
       assertScaffoldStatus(root, "failed");
       const state = readJson(root, ".claude/ccl-state.json") as {
         last_completed_step?: string;
@@ -568,7 +531,8 @@ describe("Group 5 — interruption recovery", () => {
         "last_completed_step recorded",
       );
       nodeAssert.ok(
-        Array.isArray(state.remaining_steps) && state.remaining_steps.length > 0,
+        Array.isArray(state.remaining_steps) &&
+          state.remaining_steps.length > 0,
         "remaining_steps is non-empty",
       );
       nodeAssert.ok(
@@ -583,24 +547,17 @@ describe("Group 5 — interruption recovery", () => {
   it("I2 — resume with [1] Continue skips already-done steps (mtime unchanged)", async () => {
     const root = await copyFixture("node-ts-webapp");
     try {
-      // Phase A — cause a failure at `.claudeignore`.
       placeObstacleDir(root, ".claudeignore");
-      const adapterA = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: autoDetectScript({
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
-      }).adapter;
-      await nodeAssert.rejects(() => runCcl(adapterA));
+      const handleA = buildScriptedAdapter({ tmpDir: root });
+      const inputsA = autoDetectScript({
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
+      });
+      await nodeAssert.rejects(() => runStateMachine(handleA.adapter, inputsA));
       assertScaffoldStatus(root, "failed");
 
-      // Snapshot mtimes of every file already marked done in state.json.
-      // These must not be re-written by the resume.
       const stateAfterA = readJson(root, ".claude/ccl-state.json") as {
         steps: Array<{ name: string; status: string }>;
       };
@@ -617,31 +574,18 @@ describe("Group 5 — interruption recovery", () => {
         mtimesBefore.set(rel, st.mtimeNs);
       }
 
-      // Remove the obstacle so the resume can write .claudeignore.
       await rm(join(root, ".claudeignore"), { recursive: true, force: true });
-
-      // Ensure the filesystem clock has advanced past the Phase A writes.
       await new Promise((r) => setTimeout(r, 50));
 
-      // Phase B — resume: resumeInterruptedScaffold prompts gitSync + permission only.
-      const { adapter, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            0, // Continue
-            0, // gitSync yes
-            0, // permission yes
-          ],
-        },
-      });
-      await runCcl(adapter);
+      // Phase B — resume: interrupted_choice "1" → gitsync "yes" → permission "yes"
+      const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+      await runStateMachine(adapter, ["1", "yes", "yes"]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("previous scaffold was interrupted")),
         "recovery prompt shown",
       );
       assertBaselineScaffold(root);
 
-      // Core assertion: done steps were NOT re-written during resume.
       for (const [rel, beforeNs] of mtimesBefore) {
         const after = await stat(join(root, rel), { bigint: true });
         nodeAssert.equal(
@@ -659,35 +603,28 @@ describe("Group 5 — interruption recovery", () => {
     const root = await copyFixture("node-ts-webapp");
     try {
       placeObstacleDir(root, ".claudeignore");
-      const adapterA = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: autoDetectScript({
-            skillMode: 2,
-            reviewResponses: ["looks good"],
-            gitSync: 0,
-            permission: 0,
-          }),
-        },
-      }).adapter;
-      await nodeAssert.rejects(() => runCcl(adapterA));
+      const handleA = buildScriptedAdapter({ tmpDir: root });
+      const inputsA = autoDetectScript({
+        skillMode: "3",
+        reviewResponses: ["looks good"],
+        permission: "yes",
+        gitSync: "yes",
+      });
+      await nodeAssert.rejects(() => runStateMachine(handleA.adapter, inputsA));
       await rm(join(root, ".claudeignore"), { recursive: true, force: true });
 
-      const { adapter, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            1,              // Restart (interrupted prompt)
-            0,              // auto-detect
-            0,              // §8.1 Re-scaffold (fixture artifacts still on disk from Phase A)
-            2,              // skill mode: skip
-            "looks good",   // review
-            0,              // gitSync yes
-            0,              // permission yes
-          ],
-        },
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+      // Phase B — restart: interrupted_choice "2" → greeting "1" → rescaffold "1"
+      // (CLAUDE.md from Phase A still on disk so §8.1 fires) → skill → review → ...
+      await runStateMachine(adapter, [
+        "2",
+        "1",
+        "1",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("previous scaffold was interrupted")),
       );
@@ -707,7 +644,6 @@ describe("Group 5 — interruption recovery", () => {
 
 describe("Group 6 — best-practices refresh", () => {
   async function seedOverduePractices(root: string): Promise<void> {
-    // Set next_check_due in the past so isRefreshDue(ctx, NOW) returns true.
     const ctx = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
     await savePractices(root, ctx);
   }
@@ -716,21 +652,8 @@ describe("Group 6 — best-practices refresh", () => {
     const root = await copyFixture("node-ts-webapp");
     try {
       await seedOverduePractices(root);
-      const { adapter, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            1, // Later — get past the refresh prompt
-            ...autoDetectScript({
-              skillMode: 2,
-              reviewResponses: ["looks good"],
-              gitSync: 0,
-              permission: 0,
-            }),
-          ],
-        },
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = buildScriptedAdapter({ tmpDir: root });
+      await runStateMachine(adapter, ["later"]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("7 days since your best practices")),
       );
@@ -744,7 +667,7 @@ describe("Group 6 — best-practices refresh", () => {
     try {
       await seedOverduePractices(root);
       const baseline = (await loadPractices(root))!;
-      const removedId = baseline.practices[0]!.id; // drop the seed
+      const removedId = baseline.practices[0]!.id;
       const addition: PracticeEntry = {
         id: "bp-next",
         title: "New Practice",
@@ -753,29 +676,14 @@ describe("Group 6 — best-practices refresh", () => {
         added: "2026-04-24",
         status: "active",
       };
-      // Candidate list = (baseline minus removedId) ∪ {addition}
       const candidates = baseline.practices
         .filter((p) => p.id !== removedId)
         .concat(addition);
 
       const webSearch = async () => candidates;
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            0, // Refresh → Accept
-            0, // Accept changes → Yes
-            ...autoDetectScript({
-              skillMode: 2,
-              reviewResponses: ["looks good"],
-              gitSync: 0,
-              permission: 0,
-            }),
-          ],
-        },
-        webSearch,
-      });
-      await runCcl(adapter);
+      const { adapter } = buildScriptedAdapter({ tmpDir: root, webSearch });
+      // Refresh + Yes only — no scaffold (which would overwrite practices file).
+      await runStateMachine(adapter, ["refresh", "yes"]);
       const reloaded = (await loadPractices(root))!;
       nodeAssert.notEqual(
         reloaded.version,
@@ -803,21 +711,8 @@ describe("Group 6 — best-practices refresh", () => {
         join(root, ".claude/ccl-practices.json"),
         "utf8",
       );
-      const { adapter } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            1, // Later
-            ...autoDetectScript({
-              skillMode: 2,
-              reviewResponses: ["looks good"],
-              gitSync: 0,
-              permission: 0,
-            }),
-          ],
-        },
-      });
-      await runCcl(adapter);
+      const { adapter } = buildScriptedAdapter({ tmpDir: root });
+      await runStateMachine(adapter, ["later"]);
       const after = readFileSync(
         join(root, ".claude/ccl-practices.json"),
         "utf8",
@@ -832,40 +727,21 @@ describe("Group 6 — best-practices refresh", () => {
     const root = await copyFixture("node-ts-webapp");
     try {
       await seedOverduePractices(root);
-      const { adapter: a1 } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            2, // Never
-            ...autoDetectScript({
-              skillMode: 2,
-              reviewResponses: ["looks good"],
-              gitSync: 0,
-              permission: 0,
-            }),
-          ],
-        },
-      });
-      await runCcl(a1);
+      const handle1 = buildScriptedAdapter({ tmpDir: root });
+      await runStateMachine(handle1.adapter, ["never"]);
 
       const refreshed = (await loadPractices(root))!;
       nodeAssert.equal(refreshed.refresh, "never");
 
-      // Second invocation: the refresh prompt must not appear (no refresh choice
-      // in the script — script underrun would throw if it were asked).
-      // Snapshot existing-scaffold state so §8.1 warning kicks in.
-      const { adapter: a2, sayLog } = buildScriptedAdapter({
-        tmpDir: root,
-        script: {
-          inputs: [
-            0, // auto-detect
-            1, // skip existing scaffold
-          ],
-        },
-      });
-      await runCcl(a2);
+      // Second invocation: no refresh prompt should fire. State machine
+      // has conv_step="greeting" from prior call's chained handleGreeting,
+      // but second invocation reads state and emits greeting (no refresh).
+      const handle2 = buildScriptedAdapter({ tmpDir: root });
+      await runStateMachine(handle2.adapter, []);
       nodeAssert.ok(
-        !sayLog.some((s) => s.includes("7 days since your best practices")),
+        !handle2.sayLog.some((s) =>
+          s.includes("7 days since your best practices"),
+        ),
         "refresh prompt suppressed on subsequent invocation",
       );
     } finally {
@@ -877,25 +753,24 @@ describe("Group 6 — best-practices refresh", () => {
     const root = await copyFixture("node-ts-webapp");
     try {
       await seedOverduePractices(root);
-      const webSearch = async () => {
+      const webSearch = async (): Promise<PracticeEntry[]> => {
         throw new OfflineError();
       };
       const { adapter, sayLog } = buildScriptedAdapter({
         tmpDir: root,
-        script: {
-          inputs: [
-            0,              // Refresh → Accept → OfflineError silently skipped
-            0,              // auto-detect
-            0,              // §8.1 Re-scaffold (seedOverduePractices created .claude/)
-            2,              // skill mode: skip
-            "looks good",
-            0,              // gitSync yes
-            0,              // permission yes
-          ],
-        },
         webSearch,
       });
-      await runCcl(adapter);
+      // refresh → silent fallback to greeting → auto-detect → ...
+      // (.claude/ccl-practices.json exists but no settings.json/CLAUDE.md →
+      //  no rescaffold warning).
+      await runStateMachine(adapter, [
+        "refresh",
+        "1",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       nodeAssert.ok(
         !sayLog.some((s) => s.includes("Refresh failed")),
         "no failure prompt on offline",
@@ -910,26 +785,23 @@ describe("Group 6 — best-practices refresh", () => {
     const root = await copyFixture("node-ts-webapp");
     try {
       await seedOverduePractices(root);
-      const webSearch = async () => {
+      const webSearch = async (): Promise<PracticeEntry[]> => {
         throw new Error("503 unavailable");
       };
       const { adapter, sayLog } = buildScriptedAdapter({
         tmpDir: root,
-        script: {
-          inputs: [
-            0,              // Refresh → Accept
-            1,              // Retry/Skip → Skip for now
-            0,              // auto-detect
-            0,              // §8.1 Re-scaffold (seedOverduePractices created .claude/)
-            2,              // skill mode: skip
-            "looks good",
-            0,              // gitSync yes
-            0,              // permission yes
-          ],
-        },
         webSearch,
       });
-      await runCcl(adapter);
+      // refresh → fail → "Refresh failed" + Retry/Skip → "skip" → greeting → auto …
+      await runStateMachine(adapter, [
+        "refresh",
+        "skip",
+        "1",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("Refresh failed")),
         "Retry/Skip prompt shown",

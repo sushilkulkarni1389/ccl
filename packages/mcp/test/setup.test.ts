@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { beforeEach, describe, it } from "node:test";
 import nodeAssert from "node:assert/strict";
 import {
   chmod,
@@ -13,7 +13,35 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runSetup, type SetupOptions } from "../src/setup.js";
+import {
+  __setKeyringStoreForTesting,
+  dispatchCli,
+  removeApiKey,
+  resolveApiKey,
+  runSetup,
+  setApiKey,
+  type KeyringStore,
+  type SetupOptions,
+} from "../src/setup.js";
+
+// ──────────────────────────────────────────────────────────────────────────
+// In-memory keychain mock — installed at module load so no test path can
+// reach the real OS keychain. Cleared per-test via beforeEach below.
+// ──────────────────────────────────────────────────────────────────────────
+
+const mockKeychain = new Map<string, string>();
+const mockKeyringStore: KeyringStore = {
+  async get(service, account) {
+    return mockKeychain.get(`${service}:${account}`) ?? null;
+  },
+  async set(service, account, value) {
+    mockKeychain.set(`${service}:${account}`, value);
+  },
+  async delete(service, account) {
+    mockKeychain.delete(`${service}:${account}`);
+  },
+};
+__setKeyringStoreForTesting(mockKeyringStore);
 
 // ──────────────────────────────────────────────────────────────────────────
 // Harness
@@ -456,6 +484,257 @@ describe("node version guard", () => {
       nodeAssert.equal(await pathExists(configPath), false, "no file should be created");
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// API key — keychain integration
+//
+// These tests exercise the new flow where keys live in the OS keychain
+// (mocked here with an in-memory Map) and never touch claude.json.
+// ──────────────────────────────────────────────────────────────────────────
+
+interface ConfigShape {
+  mcpServers?: Record<
+    string,
+    { command?: string; args?: string[]; env?: Record<string, string> }
+  >;
+}
+
+describe("API key — keychain integration", () => {
+  beforeEach(() => {
+    mockKeychain.clear();
+  });
+
+  it("setApiKey stores in the mock keychain and writes nothing to disk", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      await setApiKey("sk-ant-test-keychain-store-1234", configPath);
+      nodeAssert.equal(
+        mockKeychain.get("ccl:anthropic-api-key"),
+        "sk-ant-test-keychain-store-1234",
+        "value must land in the mock keychain",
+      );
+      nodeAssert.equal(
+        await pathExists(configPath),
+        false,
+        "setApiKey must not create claude.json",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("setApiKey strips a legacy plaintext key from claude.json", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      const initial = {
+        mcpServers: {
+          ccl: {
+            command: "node",
+            args: [SERVER_DIST_PATH],
+            type: "stdio",
+            env: { ANTHROPIC_API_KEY: "sk-ant-legacy-aaaaaaaaaaaa" },
+          },
+        },
+      };
+      await writeFile(configPath, JSON.stringify(initial, null, 2) + "\n", "utf8");
+
+      await setApiKey("sk-ant-replacement-bbbbbbbbbb", configPath);
+
+      const parsed = JSON.parse(await readFile(configPath, "utf8")) as ConfigShape;
+      nodeAssert.equal(
+        parsed.mcpServers?.["ccl"]?.env,
+        undefined,
+        "legacy env block must be stripped when the key was its only field",
+      );
+      nodeAssert.equal(
+        mockKeychain.get("ccl:anthropic-api-key"),
+        "sk-ant-replacement-bbbbbbbbbb",
+        "new key persists in the keychain",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removeApiKey deletes the entry from the mock keychain", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      mockKeychain.set("ccl:anthropic-api-key", "sk-ant-existing-cccccccccc");
+      await removeApiKey(configPath);
+      nodeAssert.equal(
+        mockKeychain.has("ccl:anthropic-api-key"),
+        false,
+        "keychain entry must be gone",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--set-key CLI flag stores the key and prints the keychain confirmation", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await dispatchCli(
+        ["--set-key", "sk-ant-cli-flag-dddddddddd"],
+        {
+          configPath,
+          stdout: (m) => stdout.push(m),
+          stderr: (m) => stderr.push(m),
+        },
+      );
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stderr.length, 0);
+      nodeAssert.ok(
+        stdout.some((m) => m.includes("system keychain")),
+        "stdout must confirm keychain storage",
+      );
+      nodeAssert.equal(
+        mockKeychain.get("ccl:anthropic-api-key"),
+        "sk-ant-cli-flag-dddddddddd",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("--remove-key CLI flag deletes the key and prints removed", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      mockKeychain.set("ccl:anthropic-api-key", "sk-ant-cli-remove-eeeeeeeee");
+      const stdout: string[] = [];
+      const code = await dispatchCli(["--remove-key"], {
+        configPath,
+        stdout: (m) => stdout.push(m),
+        stderr: () => {},
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.ok(
+        stdout.some((m) => m.toLowerCase().includes("removed")),
+        "stdout must include 'removed'",
+      );
+      nodeAssert.equal(mockKeychain.has("ccl:anthropic-api-key"), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runSetup migrates a plaintext key from claude.json into the keychain", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      const initial = {
+        mcpServers: {
+          ccl: {
+            command: "node",
+            args: [SERVER_DIST_PATH],
+            type: "stdio",
+            env: { ANTHROPIC_API_KEY: "sk-ant-migrate-ffffffffff" },
+          },
+        },
+      };
+      await writeFile(configPath, JSON.stringify(initial, null, 2) + "\n", "utf8");
+
+      const { exitCode, stdout } = await run({
+        configPath,
+        serverDistPath: SERVER_DIST_PATH,
+      });
+      nodeAssert.equal(exitCode, 0);
+      nodeAssert.equal(
+        mockKeychain.get("ccl:anthropic-api-key"),
+        "sk-ant-migrate-ffffffffff",
+        "key must land in the keychain",
+      );
+      const parsed = JSON.parse(await readFile(configPath, "utf8")) as ConfigShape;
+      nodeAssert.equal(
+        parsed.mcpServers?.["ccl"]?.env,
+        undefined,
+        "ANTHROPIC_API_KEY must be absent from claude.json after migration",
+      );
+      nodeAssert.ok(
+        stdout.some((m) => m.includes("Migrated API key")),
+        "migration message must be printed once",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runSetup migration is idempotent — second run does not migrate again", async () => {
+    const root = await mkFixture();
+    try {
+      const configPath = join(root, "claude.json");
+      const initial = {
+        mcpServers: {
+          ccl: {
+            command: "node",
+            args: [SERVER_DIST_PATH],
+            type: "stdio",
+            env: { ANTHROPIC_API_KEY: "sk-ant-once-gggggggggg" },
+          },
+        },
+      };
+      await writeFile(configPath, JSON.stringify(initial, null, 2) + "\n", "utf8");
+
+      const first = await run({ configPath, serverDistPath: SERVER_DIST_PATH });
+      nodeAssert.equal(first.exitCode, 0);
+      const afterFirst = await readFile(configPath, "utf8");
+
+      const second = await run({ configPath, serverDistPath: SERVER_DIST_PATH });
+      nodeAssert.equal(second.exitCode, 0);
+      nodeAssert.ok(
+        second.stdout.every((m) => !m.includes("Migrated")),
+        "second run must not print the migration message",
+      );
+      nodeAssert.equal(
+        await readFile(configPath, "utf8"),
+        afterFirst,
+        "second run must leave claude.json byte-identical",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolveApiKey returns undefined when neither keychain nor env is set", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      const v = await resolveApiKey();
+      nodeAssert.equal(v, undefined, "no key in either location → undefined");
+    } finally {
+      if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("runSetup completes when the keychain is empty (no crash on absent key)", async () => {
+    const root = await mkFixture();
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      const configPath = join(root, "claude.json");
+      const { exitCode } = await run({
+        configPath,
+        serverDistPath: SERVER_DIST_PATH,
+      });
+      nodeAssert.equal(exitCode, 0);
+      nodeAssert.equal(
+        mockKeychain.has("ccl:anthropic-api-key"),
+        false,
+        "no key written when none was available",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
     }
   });
 });

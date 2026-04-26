@@ -24,6 +24,11 @@ user-facing prompts. The security model assumes:
    trusted domain allowlist before writing them to disk. Candidates from
    unknown domains are discarded and reported to the user.
 
+4. **API keys are stored exclusively in the OS keychain via `@napi-rs/keyring`.**
+   The key never persists in `claude.json`. The
+   `process.env.ANTHROPIC_API_KEY` fallback is supported for CI/headless
+   environments where a keychain is unavailable.
+
 ## Audit trail
 Every elicitation prompt and its response is logged via
 `sendLoggingMessage` at level `info`. In Claude Code, these appear in the

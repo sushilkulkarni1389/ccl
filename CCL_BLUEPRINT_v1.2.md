@@ -7,6 +7,21 @@
 
 ## 0. Changelog
 
+### v1.3 — 2026-04-25
+- **§5, §6, §8 Elicitation replaced:** all `elicitInput()` calls removed.
+  The `/ccl` tool now accepts an optional `input?: string` parameter.
+  CCL outputs questions as plain text; conversation state is tracked
+  via `conversation_step` in `ccl-state.json`. Fixes dialogs lingering
+  on screen and timing out in Claude Code.
+- **§14 ccl-state.json schema:** added `conversation_step: string`,
+  `guided_answers: {}`, and `plan_overrides: {}` fields. `plan_overrides`
+  persists the cumulative LLM-derived overrides across plan-review turns
+  so successive change requests compose rather than reset.
+- **§4.1, §8.1, §8.2, §15 prompt UI:** replaced `[1] [2]` button-style
+  options and `[Yes] [No]` buttons with plain-text hints (e.g. "Type 1
+  or 2 to continue"). MCP tool output is plain text only — there is no
+  UI layer to render buttons.
+
 ### v1.2 — 2026-04-24
 - **§20 SDK naming corrected:** `@anthropic-ai/sdk` is the Anthropic API client used
   for `llmCall` in the MCP server. The MCP server transport SDK is
@@ -87,13 +102,20 @@ I'll scaffold a production-ready Claude Code project for you — including
 CLAUDE.md, skills, subagents, hooks, and all configuration files.
 
 How would you like to get started?
-
-  [1] Auto-detect   — I'll scan your current directory, infer your stack
-                      and structure, and scaffold everything automatically.
-
-  [2] Guided setup  — We'll go through your project together so I can
-                      tailor everything precisely to what you're building.
+[1] Auto-detect  — scan your directory
+[2] Guided setup — answer 5 questions
+Type 1 or 2 to continue.
 ```
+
+Before this prompt is shown, CCL runs three pre-greeting checks in order
+and detours through the matching prompt if any fires:
+
+1. **Interrupted recovery** — see §8.2.
+2. **Re-scaffold warning** — see §8.1.
+3. **Practices refresh** — see §15.
+
+Once the user resolves the detour, CCL falls through to the greeting
+above.
 
 ---
 
@@ -118,13 +140,13 @@ User types: /ccl → selects [1]
    - Repeat until user approves
 
 5. CCL asks one-time session permission:
-   "May I create and modify files in this project?"
-   [Yes, for this session] [No]
+   "May I create and modify files in this project?
+    Type 'yes' or 'no'."
    → If yes: no further permission prompts for this session
 
 6. CCL asks about ccl-state.json git sync:
-   "Would you like to sync ccl-state.json to git?"
-   [Yes] [No]
+   "Would you like to sync ccl-state.json to git?
+    Type 'yes' or 'no'."
    → Updates .gitignore accordingly
 
 7. CCL scaffolds everything in one shot (see §9 — What Gets Scaffolded)
@@ -257,17 +279,14 @@ If CCL finds existing `.claude/` or `CLAUDE.md`:
 ```
 ⚠️  I found an existing CCL scaffold in this directory.
 
-  CLAUDE.md         ✓ exists
-  .claude/          ✓ exists
-  ccl-practices.json  ✓ exists (v1.2, last updated 3 days ago)
-
 What would you like to do?
-
-  [1] Re-scaffold — Start fresh. All existing CCL files will be overwritten.
-  [2] Skip — Leave everything as-is and exit.
+[1] Re-scaffold — start fresh; existing CCL files will be overwritten
+[2] Skip        — leave everything as-is and exit
+Type 1 or 2 to continue.
 ```
 
-If user selects re-scaffold → full overwrite, same flow as fresh scaffold.
+If user selects `1` → falls through to the main greeting (§4.1) and any
+later overwrite happens during scaffolding.
 
 ### 8.2 Scaffolding Fails Midway
 
@@ -288,14 +307,17 @@ On next `/ccl`, if interrupted state detected:
 ```
 ⚠️  It looks like a previous scaffold was interrupted.
 
-Last completed step: skills/deploy
-Remaining: agents/security-auditor, settings.json
-
-  [1] Continue from where I left off
-      (re-executes the full plan; already-written files are overwritten
-       idempotently — content is identical for unchanged steps)
-  [2] Start again from scratch
+[1] Continue from where I left off
+    — re-executes the full plan; already-written files are overwritten
+      idempotently (content is identical for unchanged steps)
+[2] Start again from scratch
+Type 1 or 2 to continue.
 ```
+
+The detector treats a state file as interrupted when `status` is not
+`complete` AND `steps[]` has been populated (i.e. scaffold execution had
+already begun). Mid-conversation states with empty `steps[]` resume
+directly via `conversation_step` without showing this prompt.
 
 ### 8.3 Git Handling
 
@@ -509,7 +531,10 @@ tools: [Read, Grep, Glob]
     { "name": "skills/deploy", "status": "done" },
     { "name": "agents/security-auditor", "status": "pending" }
   ],
-  "git_sync": true
+  "git_sync": true,
+  "conversation_step": "greeting",
+  "guided_answers": {},
+  "plan_overrides": {}
 }
 ```
 
@@ -530,10 +555,10 @@ if today >= next_check_due → trigger refresh prompt
 📦 It's been 7 days since your best practices were last checked.
 
 Would you like me to search for updates?
-
-  [Accept]  — Refresh now (takes ~30 seconds)
-  [Later]   — Remind me next time
-  [Never]   — Don't ask again
+[refresh] — refresh now (takes ~30 seconds)
+[later]   — remind me next time
+[never]   — don't ask again
+Type 'refresh', 'later', or 'never' to continue.
 ```
 
 ### Refresh flow
@@ -558,7 +583,7 @@ Would you like me to search for updates?
    REMOVE:
    - [practice title] — no longer recommended as of [date]
 
-   Accept changes? [Yes] [No] [Review each one]
+   Accept changes? Type 'yes' or 'no'.
 
 5. If accepted → ccl-practices.json updates, version bumps if changed
 6. If no changes → ccl-practices.json last_updated refreshes, version stays
@@ -748,5 +773,5 @@ Build in this order — each phase is independently testable:
 
 ---
 
-*Blueprint version: 1.1 — April 24, 2026*
+*Blueprint version: 1.3 — April 25, 2026*
 *Do not modify during active build sessions. Create a new version instead.*

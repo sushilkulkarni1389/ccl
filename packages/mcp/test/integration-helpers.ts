@@ -1,5 +1,10 @@
 // Shared helpers for Phase 8 integration tests.
 // Test-only — not exported from the package barrel.
+//
+// v1.3 — the state machine architecture replaced scripted ask/choose
+// queues with single-input runCcl calls. `runStateMachine` drives the
+// machine across N sequential turns, reading ccl-state.json between
+// iterations.
 
 import nodeAssert from "node:assert/strict";
 import {
@@ -17,7 +22,11 @@ import { dirname, join, resolve } from "node:path";
 
 import type { LlmCall, PracticeEntry } from "@ccl/core";
 
-import type { CclAdapter } from "../src/commands/ccl.js";
+import {
+  runCcl,
+  type CclAdapter,
+  type CclRunResult,
+} from "../src/commands/ccl.js";
 
 // ──────────────────────────────────────────────────────────────────────────
 // Filesystem assertions
@@ -90,8 +99,6 @@ export async function mkTmpDir(prefix = "ccl-integration-"): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix));
 }
 
-// Fixtures live alongside this file. `test/fixtures/<name>`.
-// Resolved against process.cwd() which is packages/mcp during `npm test`.
 export const FIXTURES_DIR = resolve(process.cwd(), "test", "fixtures");
 
 export async function copyFixture(name: string): Promise<string> {
@@ -106,18 +113,16 @@ export function mkEmptyDirSync(prefix = "ccl-integration-empty-"): string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Scripted adapter
+// State-machine adapter — captures `say` output and provides
+// llmCall / webSearch / runGitCommand. ask/choose are vestigial (the v1.3
+// state machine reads `input` directly), but kept for interface compat —
+// they return "" / -1 respectively.
 // ──────────────────────────────────────────────────────────────────────────
 
 export type WebSearchFn = (query: string) => Promise<PracticeEntry[]>;
 
-export interface AdapterScript {
-  inputs: Array<string | number>;
-}
-
 export interface BuildScriptedAdapterOptions {
   tmpDir: string;
-  script: AdapterScript;
   llmCall?: LlmCall;
   webSearch?: WebSearchFn;
   now?: () => Date;
@@ -127,7 +132,6 @@ export interface BuildScriptedAdapterOptions {
 export interface ScriptedAdapterHandle {
   adapter: CclAdapter;
   sayLog: string[];
-  remaining: () => number;
   llmCallCount: () => number;
   webSearchCount: () => number;
 }
@@ -136,7 +140,6 @@ export function buildScriptedAdapter(
   opts: BuildScriptedAdapterOptions,
 ): ScriptedAdapterHandle {
   const sayLog: string[] = [];
-  const queue: Array<string | number> = [...opts.script.inputs];
   let llmCalls = 0;
   let webSearchCalls = 0;
 
@@ -157,22 +160,10 @@ export function buildScriptedAdapter(
   const adapter: CclAdapter = {
     cwd: opts.tmpDir,
     async ask() {
-      const next = queue.shift();
-      if (typeof next !== "string") {
-        throw new Error(
-          `script underrun: expected string (ask), got ${JSON.stringify(next)}`,
-        );
-      }
-      return next;
+      return "";
     },
     async choose() {
-      const next = queue.shift();
-      if (typeof next !== "number") {
-        throw new Error(
-          `script underrun: expected number (choose), got ${JSON.stringify(next)}`,
-        );
-      }
-      return next;
+      return -1;
     },
     async say(msg) {
       sayLog.push(msg);
@@ -187,11 +178,36 @@ export function buildScriptedAdapter(
   return {
     adapter,
     sayLog,
-    remaining: () => queue.length,
     llmCallCount: () => llmCalls,
     webSearchCount: () => webSearchCalls,
   };
 }
+
+// runStateMachine drives runCcl across N sequential turns. Each entry of
+// `inputs` is one user reply. The first call is implicit (no input —
+// emits the initial prompt). Stops early when status is non-awaiting.
+//
+// Returns the final result + the number of runCcl calls actually made.
+export async function runStateMachine(
+  adapter: CclAdapter,
+  inputs: string[],
+  opts: { maxIterations?: number } = {},
+): Promise<{ result: CclRunResult; iterations: number }> {
+  const maxIter = opts.maxIterations ?? 60;
+  let result: CclRunResult = await runCcl(adapter);
+  let iterations = 1;
+  for (const input of inputs) {
+    if (result.status !== "awaiting_input") break;
+    if (iterations >= maxIter) break;
+    result = await runCcl(adapter, input);
+    iterations += 1;
+  }
+  return { result, iterations };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// LLM call factories
+// ──────────────────────────────────────────────────────────────────────────
 
 export function buildDefaultLlmCall(reviewResponse: string = "{}"): LlmCall {
   return async (prompt) => {
@@ -241,58 +257,61 @@ export function buildReviewLoopLlmCall(reviewResponses: string[]): {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Canonical scripted sequences — mirror Phase 5 prompt order in ccl.ts
+// v1.3 input scripts — produce string[] for runStateMachine.
+// Each helper covers one canonical flow shape.
 // ──────────────────────────────────────────────────────────────────────────
 
-export interface AutoDetectAnswers {
-  skillMode: 0 | 1 | 2;
-  reviewResponses: Array<string | number>;
-  gitSync: 0 | 1;
-  permission: 0 | 1;
-  preSteps?: Array<string | number>;
+export interface AutoDetectInputsArgs {
+  // "1" | "2" | "3" — only emitted when llmCall is set (skill_mode prompt
+  // appears only with non-empty skillEstimates).
+  skillMode?: "1" | "2" | "3";
+  // One element per plan-review turn — last must be an approval token
+  // ("ok", "looks good", etc.).
+  reviewResponses: string[];
+  permission: "yes" | "no";
+  gitSync: "yes" | "no";
+  // Optional pre-greeting branches: refresh prompts, interrupted prompts,
+  // or rescaffold warnings.
+  preSteps?: string[];
 }
 
-export function autoDetectScript(
-  a: AutoDetectAnswers,
-): Array<string | number> {
+export function autoDetectScript(a: AutoDetectInputsArgs): string[] {
   return [
     ...(a.preSteps ?? []),
-    0, // greeting → auto-detect
-    a.skillMode,
+    "1",
+    ...(a.skillMode ? [a.skillMode] : []),
     ...a.reviewResponses,
-    a.gitSync,
     a.permission,
+    a.gitSync,
   ];
 }
 
-export interface GuidedSetupAnswers {
+export interface GuidedSetupInputsArgs {
   q1: string;
   q2: string;
   q3: string;
   q4: string;
   q5: string;
-  skillMode: 0 | 1 | 2;
-  reviewResponses: Array<string | number>;
-  gitSync: 0 | 1;
-  permission: 0 | 1;
-  preSteps?: Array<string | number>;
+  skillMode?: "1" | "2" | "3";
+  reviewResponses: string[];
+  permission: "yes" | "no";
+  gitSync: "yes" | "no";
+  preSteps?: string[];
 }
 
-export function guidedSetupScript(
-  a: GuidedSetupAnswers,
-): Array<string | number> {
+export function guidedSetupScript(a: GuidedSetupInputsArgs): string[] {
   return [
     ...(a.preSteps ?? []),
-    1, // greeting → guided
+    "2",
     a.q1,
     a.q2,
     a.q3,
     a.q4,
     a.q5,
-    a.skillMode,
+    ...(a.skillMode ? [a.skillMode] : []),
     ...a.reviewResponses,
-    a.gitSync,
     a.permission,
+    a.gitSync,
   ];
 }
 

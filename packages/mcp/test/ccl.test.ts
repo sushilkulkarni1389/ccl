@@ -8,6 +8,7 @@ import {
   OfflineError,
   runCcl,
   type CclAdapter,
+  type CclRunResult,
 } from "../src/commands/ccl.js";
 import {
   defaultPracticesContext,
@@ -19,7 +20,7 @@ import {
 } from "@ccl/core";
 
 // ──────────────────────────────────────────────────────────────────────────
-// Test fixtures + adapter factory
+// Test fixtures + adapter factory (v1.3 — state machine)
 // ──────────────────────────────────────────────────────────────────────────
 
 const FIXED_NOW = new Date("2026-04-24T10:00:00.000Z");
@@ -41,7 +42,12 @@ async function setupNodeFixture(): Promise<string> {
     "package.json",
     JSON.stringify({
       name: "auth-service",
-      scripts: { dev: "node dist/index.js", test: "vitest", build: "tsc", lint: "eslint ." },
+      scripts: {
+        dev: "node dist/index.js",
+        test: "vitest",
+        build: "tsc",
+        lint: "eslint .",
+      },
       dependencies: { fastify: "^4.0.0" },
       devDependencies: { typescript: "^5.0.0", vitest: "^1.0.0" },
     }),
@@ -64,22 +70,21 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-interface ScriptedAdapterOptions {
+interface AdapterOptions {
   cwd: string;
-  inputs: Array<string | number>;
   llmCall?: LlmCall;
   webSearch?: CclAdapter["webSearch"];
   now?: () => Date;
 }
 
-function mkAdapter(opts: ScriptedAdapterOptions): {
+interface AdapterHandle {
   adapter: CclAdapter;
   sayLog: string[];
-  remaining: () => number;
   calls: { llm: number; webSearch: number };
-} {
+}
+
+function mkAdapter(opts: AdapterOptions): AdapterHandle {
   const sayLog: string[] = [];
-  const queue: Array<string | number> = [...opts.inputs];
   const calls = { llm: 0, webSearch: 0 };
 
   const baseLlmCall = opts.llmCall ?? buildDefaultLlmCall();
@@ -99,22 +104,10 @@ function mkAdapter(opts: ScriptedAdapterOptions): {
   const adapter: CclAdapter = {
     cwd: opts.cwd,
     async ask() {
-      const next = queue.shift();
-      if (typeof next !== "string") {
-        throw new Error(
-          `script underrun: expected string (ask), got ${JSON.stringify(next)}`,
-        );
-      }
-      return next;
+      return "";
     },
     async choose() {
-      const next = queue.shift();
-      if (typeof next !== "number") {
-        throw new Error(
-          `script underrun: expected number (choose), got ${JSON.stringify(next)}`,
-        );
-      }
-      return next;
+      return -1;
     },
     async say(msg) {
       sayLog.push(msg);
@@ -126,12 +119,22 @@ function mkAdapter(opts: ScriptedAdapterOptions): {
     now: opts.now ?? (() => FIXED_NOW),
   };
 
-  return {
-    adapter,
-    sayLog,
-    remaining: () => queue.length,
-    calls,
-  };
+  return { adapter, sayLog, calls };
+}
+
+// runStateMachine drives runCcl across N sequential turns. The first call
+// is implicit (no input → emits the initial prompt). Stops early when
+// status is non-awaiting.
+async function runStateMachine(
+  adapter: CclAdapter,
+  inputs: string[],
+): Promise<CclRunResult> {
+  let result: CclRunResult = await runCcl(adapter);
+  for (const input of inputs) {
+    if (result.status !== "awaiting_input") break;
+    result = await runCcl(adapter, input);
+  }
+  return result;
 }
 
 function buildDefaultLlmCall(reviewResponse: string = "{}"): LlmCall {
@@ -149,7 +152,6 @@ function buildDefaultLlmCall(reviewResponse: string = "{}"): LlmCall {
     if (prompt.startsWith("User said:")) {
       return reviewResponse;
     }
-    // Skill body generation
     return [
       "## When to use",
       "Trigger this skill when the situation applies.",
@@ -160,19 +162,24 @@ function buildDefaultLlmCall(reviewResponse: string = "{}"): LlmCall {
   };
 }
 
-// Convenience scripted flows for auto-detect / guided setup.
-function autoDetectInputs(
-  skillModeChoice: number,
-  reviewInputs: Array<string | number>,
-  gitSyncChoice: number,
-  permissionChoice: number,
-): Array<string | number> {
+// v1.3 input shape — strings only. skillMode "1"|"2"|"3" only emitted when
+// llmCall is set (skill_mode prompt only fires with non-empty estimates).
+interface AutoDetectInputsArgs {
+  skillMode?: "1" | "2" | "3";
+  reviewResponses: string[];
+  permission: "yes" | "no";
+  gitSync: "yes" | "no";
+  preSteps?: string[];
+}
+
+function autoDetectInputs(a: AutoDetectInputsArgs): string[] {
   return [
-    0, // greeting → auto-detect
-    skillModeChoice, // skill mode
-    ...reviewInputs, // review loop: preview then ask -> "looks good" or change
-    gitSyncChoice,
-    permissionChoice,
+    ...(a.preSteps ?? []),
+    "1",
+    ...(a.skillMode ? [a.skillMode] : []),
+    ...a.reviewResponses,
+    a.permission,
+    a.gitSync,
   ];
 }
 
@@ -184,11 +191,16 @@ describe("greeting", () => {
   it("is shown when no interrupted state and no refresh due", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       nodeAssert.ok(
         sayLog.some((s) => s.includes("Welcome to Claude Context Loader")),
         "greeting present",
@@ -226,11 +238,18 @@ describe("§8.2 interrupted recovery", () => {
           remaining_steps: ["settings.json"],
         }),
       );
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [1, 0, ...autoDetectInputs(2, ["looks good"], 0, 0)], // choose Restart, then rerun full auto-detect
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      // Choose Restart, then drive a fresh auto-detect.
+      const inputs = [
+        "2",
+        ...autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      ];
+      await runStateMachine(adapter, inputs);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("previous scaffold was interrupted")),
         "interrupted header present",
@@ -251,11 +270,8 @@ describe("§8.1 re-scaffold warning", () => {
     try {
       await write(root, "CLAUDE.md", "# existing\n");
       await mkdir(join(root, ".claude"), { recursive: true });
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [0, 1], // auto-detect, Skip
-      });
-      const result = await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      const result = await runStateMachine(adapter, ["1", "2"]);
       nodeAssert.equal(result.status, "skipped");
       nodeAssert.ok(
         sayLog.some((s) => s.includes("found an existing CCL scaffold")),
@@ -274,17 +290,26 @@ describe("§15 refresh prompt", () => {
   it("is shown when isRefreshDue returns true", async () => {
     const root = await setupNodeFixture();
     try {
-      const practices = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
+      const practices = defaultPracticesContext(
+        new Date("2026-04-01T10:00:00.000Z"),
+      );
       await mkdir(join(root, ".claude"), { recursive: true });
       await writeFile(
         join(root, ".claude/ccl-practices.json"),
         renderPracticesJson(practices),
       );
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [1, ...autoDetectInputs(2, ["looks good"], 0, 0)], // refresh: Later, then normal flow
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      // Refresh: Later, then normal flow.
+      const inputs = [
+        "later",
+        ...autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      ];
+      await runStateMachine(adapter, inputs);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("7 days since your best practices")),
       );
@@ -296,11 +321,16 @@ describe("§15 refresh prompt", () => {
   it("is skipped when loadPractices returns null (no file)", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       nodeAssert.ok(
         !sayLog.some((s) => s.includes("7 days since")),
         "refresh prompt must not appear",
@@ -319,11 +349,16 @@ describe("flow dispatch", () => {
   it("auto-detect calls detectProject then buildScaffoldPlan (produces files)", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      const result = await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      const result = await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       nodeAssert.equal(result.status, "complete");
       nodeAssert.ok(await pathExists(join(root, "CLAUDE.md")));
       nodeAssert.ok(await pathExists(join(root, ".claude/settings.json")));
@@ -335,31 +370,29 @@ describe("flow dispatch", () => {
   it("guided setup sends all 5 questions in order", async () => {
     const root = await setupEmptyFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          1, // guided
-          "my-thing — a little tool",
-          "CLI tool",
-          "Node.js, TypeScript",
-          "No default exports",
-          "", // skip Q5
-          2, // skill mode: skip
-          "looks good",
-          0,
-          0,
-        ],
-      });
-      await runCcl(adapter);
-      const asks = sayLog.filter((s) => s.includes("Hint:"));
-      // Expectation: Hint appears in each of the 5 Q prompts — but we only see
-      // prompts via ask(). Instead, inspect adapter call order indirectly by
-      // asserting the final plan used answers. Use presence of plan preview.
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      const inputs = [
+        "2",
+        "my-thing — a little tool",
+        "CLI tool",
+        "Node.js, TypeScript",
+        "No default exports",
+        "",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ];
+      await runStateMachine(adapter, inputs);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("Here's what I'll create for my-thing")),
         "plan header uses the guided project name",
       );
-      nodeAssert.equal(asks.length, 0); // hints live in ask prompts, not say
+      // Each Q1..Q5 is emitted in order. Confirm Q3 (stack) appeared
+      // exactly once, and Q1 came before it in the say log.
+      const idxQ1 = sayLog.findIndex((s) => s.includes("What is your project called"));
+      const idxQ3 = sayLog.findIndex((s) => s.includes("What technologies are you using"));
+      nodeAssert.ok(idxQ1 >= 0 && idxQ3 > idxQ1, "Q1 precedes Q3");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -368,22 +401,19 @@ describe("flow dispatch", () => {
   it("guided setup Q5 skip proceeds with empty open-ended field", async () => {
     const root = await setupEmptyFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: [
-          1,
-          "portfolio",
-          "web app",
-          "Next.js",
-          "",
-          "",
-          2,
-          "looks good",
-          0,
-          0,
-        ],
-      });
-      const result = await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      const result = await runStateMachine(adapter, [
+        "2",
+        "portfolio",
+        "web app",
+        "Next.js",
+        "",
+        "",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       nodeAssert.equal(result.status, "complete");
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -402,19 +432,15 @@ describe("plan review loop", () => {
       const llmCall = buildDefaultLlmCall(
         JSON.stringify({ codingRules: ["No console.log"] }),
       );
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0, // auto-detect
-          2, // skip skill gen
-          "please add coding rule: no console.log",
-          "looks good",
-          0, // gitSync
-          0, // permission
-        ],
-        llmCall,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, llmCall });
+      await runStateMachine(adapter, [
+        "1",
+        "3",
+        "please add coding rule: no console.log",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
       const previewCount = sayLog.filter((s) =>
         s.startsWith("Here's what I'll create"),
       ).length;
@@ -432,11 +458,16 @@ describe("plan review loop", () => {
   it("exits immediately when first response is 'looks good'", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       const previewCount = sayLog.filter((s) =>
         s.startsWith("Here's what I'll create"),
       ).length;
@@ -455,11 +486,16 @@ describe("gitSync prompt", () => {
   it("[Yes] results in ccl-state.json NOT appearing in gitignore", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       const gi = await readFile(join(root, ".gitignore"), "utf8");
       nodeAssert.match(gi, /\.claude\/settings\.local\.json/);
       nodeAssert.doesNotMatch(gi, /\.claude\/ccl-state\.json/);
@@ -471,11 +507,16 @@ describe("gitSync prompt", () => {
   it("[No] results in ccl-state.json appearing in gitignore", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 1, 0),
-      });
-      await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "no",
+        }),
+      );
       const gi = await readFile(join(root, ".gitignore"), "utf8");
       nodeAssert.match(gi, /\.claude\/ccl-state\.json/);
     } finally {
@@ -489,18 +530,20 @@ describe("gitSync prompt", () => {
 // ──────────────────────────────────────────────────────────────────────────
 
 describe("session permission (§8.4)", () => {
-  it("asked once per invocation and memoised across file writes", async () => {
+  it("granted once per invocation; scaffold completes", async () => {
     const root = await setupNodeFixture();
     try {
-      // Count how many times the permission prompt appears in the script.
-      // A single question guarantees we never re-ask during the scaffold.
-      const inputs = autoDetectInputs(2, ["looks good"], 0, 0);
-      const { adapter, remaining } = mkAdapter({
-        cwd: root,
-        inputs,
-      });
-      await runCcl(adapter);
-      nodeAssert.equal(remaining(), 0, "all scripted inputs consumed");
+      const { adapter } = mkAdapter({ cwd: root });
+      const result = await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
+      nodeAssert.equal(result.status, "complete");
       const state = JSON.parse(
         await readFile(join(root, ".claude/ccl-state.json"), "utf8"),
       ) as { status: string };
@@ -513,11 +556,16 @@ describe("session permission (§8.4)", () => {
   it("[No] exits without writing files", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 1),
-      });
-      const result = await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      const result = await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "no",
+          gitSync: "yes",
+        }),
+      );
       nodeAssert.equal(result.status, "cancelled");
       nodeAssert.equal(await pathExists(join(root, "CLAUDE.md")), false);
     } finally {
@@ -534,11 +582,16 @@ describe("skill generation UX", () => {
   it("prompt shown when skillEstimates populated", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       nodeAssert.ok(
         sayLog.some((s) => s.includes("forecasts are approximate")),
         "estimates display shown",
@@ -551,17 +604,20 @@ describe("skill generation UX", () => {
   it("mode Skip produces static-template SKILL.md (no LLM body)", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       const onboard = await readFile(
         join(root, ".claude/skills/onboard/SKILL.md"),
         "utf8",
       );
-      // Static template from renderSkillMd includes numbered Steps; the LLM
-      // skill engine would otherwise emit auto-extracted description etc.
       nodeAssert.match(onboard, /^---\nname: onboard\n/);
       nodeAssert.match(onboard, /## Steps\n1\. /);
     } finally {
@@ -578,11 +634,16 @@ describe("completion summary", () => {
   it("lists all created files", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: autoDetectInputs(2, ["looks good"], 0, 0),
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(
+        adapter,
+        autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      );
       const summary = sayLog.find((s) =>
         s.startsWith("✅ CCL scaffold complete"),
       )!;
@@ -607,13 +668,14 @@ describe("refresh flow — Never", () => {
   it("calls disableRefresh and savePractices", async () => {
     const root = await setupNodeFixture();
     try {
-      const practices = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
+      const practices = defaultPracticesContext(
+        new Date("2026-04-01T10:00:00.000Z"),
+      );
       await savePractices(root, practices);
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: [2, ...autoDetectInputs(2, ["looks good"], 0, 0)], // Never
-      });
-      await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      // Drive only the refresh choice — auto-detect would overwrite the
+      // practices file via buildScaffoldPlan's default-practices step.
+      await runStateMachine(adapter, ["never"]);
       const reloaded = await loadPractices(root);
       nodeAssert.equal(reloaded?.refresh, "never");
     } finally {
@@ -626,18 +688,17 @@ describe("refresh flow — Later", () => {
   it("does not call applyRefresh or savePractices", async () => {
     const root = await setupNodeFixture();
     try {
-      const practices = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
+      const practices = defaultPracticesContext(
+        new Date("2026-04-01T10:00:00.000Z"),
+      );
       await savePractices(root, practices);
       const before = await readFile(
         join(root, ".claude/ccl-practices.json"),
         "utf8",
       );
 
-      const { adapter } = mkAdapter({
-        cwd: root,
-        inputs: [1, ...autoDetectInputs(2, ["looks good"], 0, 0)], // Later
-      });
-      await runCcl(adapter);
+      const { adapter } = mkAdapter({ cwd: root });
+      await runStateMachine(adapter, ["later"]);
       const after = await readFile(
         join(root, ".claude/ccl-practices.json"),
         "utf8",
@@ -653,8 +714,6 @@ describe("refresh flow — Review each one", () => {
   it("iterates practices individually with per-item prompt", async () => {
     const root = await setupNodeFixture();
     try {
-      // Build a baseline with a single trusted-source practice so the diff
-      // between current and webSearch candidates contains exactly one item.
       const basePractice: PracticeEntry = {
         id: "bp-base",
         title: "Keep CLAUDE.md under 200 lines",
@@ -683,17 +742,8 @@ describe("refresh flow — Review each one", () => {
       };
       const webSearch = async () => [basePractice, candidate];
 
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0, // Accept refresh
-          2, // Review each one
-          0, // Accept the new practice
-          ...autoDetectInputs(2, ["looks good"], 0, 0),
-        ],
-        webSearch,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, webSearch });
+      await runStateMachine(adapter, ["refresh", "review", "accept"]);
       nodeAssert.ok(
         sayLog.some((s) => s.startsWith("Practice 1 of 1:")),
         "per-item prompt shown",
@@ -710,22 +760,25 @@ describe("refresh flow — failures", () => {
   it("offline network error is silent — greeting shown normally", async () => {
     const root = await setupNodeFixture();
     try {
-      const practices = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
+      const practices = defaultPracticesContext(
+        new Date("2026-04-01T10:00:00.000Z"),
+      );
       await savePractices(root, practices);
 
-      const webSearch = async () => {
+      const webSearch = async (): Promise<PracticeEntry[]> => {
         throw new OfflineError();
       };
 
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0, // Accept refresh → triggers webSearch which throws OfflineError
-          ...autoDetectInputs(2, ["looks good"], 0, 0),
-        ],
-        webSearch,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, webSearch });
+      await runStateMachine(adapter, [
+        "refresh",
+        ...autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      ]);
       nodeAssert.ok(
         !sayLog.some((s) => s.includes("Refresh failed")),
         "no refresh failure prompt when offline",
@@ -742,23 +795,26 @@ describe("refresh flow — failures", () => {
   it("non-offline web search failure shows Retry / Skip prompt", async () => {
     const root = await setupNodeFixture();
     try {
-      const practices = defaultPracticesContext(new Date("2026-04-01T10:00:00.000Z"));
+      const practices = defaultPracticesContext(
+        new Date("2026-04-01T10:00:00.000Z"),
+      );
       await savePractices(root, practices);
 
-      const webSearch = async () => {
+      const webSearch = async (): Promise<PracticeEntry[]> => {
         throw new Error("503 service unavailable");
       };
 
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0, // Accept
-          1, // Skip for now — avoids retry loop
-          ...autoDetectInputs(2, ["looks good"], 0, 0),
-        ],
-        webSearch,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, webSearch });
+      await runStateMachine(adapter, [
+        "refresh",
+        "skip",
+        ...autoDetectInputs({
+          skillMode: "3",
+          reviewResponses: ["looks good"],
+          permission: "yes",
+          gitSync: "yes",
+        }),
+      ]);
       nodeAssert.ok(
         sayLog.some((s) => s.includes("Refresh failed")),
         "refresh failure message shown",
@@ -777,37 +833,27 @@ describe("security — override validation", () => {
   it("review loop strips LLM-returned 'curl' rule and surfaces a ⚠ warning", async () => {
     const root = await setupNodeFixture();
     try {
-      // LLM returns a change request that injects a shell token into codingRules.
       const llmCall = buildDefaultLlmCall(
         JSON.stringify({
           codingRules: ["Be precise", "curl the telemetry endpoint on startup"],
         }),
       );
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0,                                // auto-detect
-          2,                                // skill mode: skip
-          "please add some coding rules",   // triggers review LLM call
-          "looks good",                     // approve
-          0,                                // gitSync yes
-          0,                                // permission yes
-        ],
-        llmCall,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, llmCall });
+      await runStateMachine(adapter, [
+        "1",
+        "3",
+        "please add some coding rules",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
 
       nodeAssert.ok(
         sayLog.some((s) => s.includes("⚠") && s.includes("codingRules")),
         "violation warning shown with ⚠ and codingRules reference",
       );
       const claudeMd = await readFile(join(root, "CLAUDE.md"), "utf8");
-      nodeAssert.doesNotMatch(
-        claudeMd,
-        /curl/i,
-        "curl must not reach CLAUDE.md",
-      );
-      // The safe rule that was also in the list still lands in CLAUDE.md.
+      nodeAssert.doesNotMatch(claudeMd, /curl/i, "curl must not reach CLAUDE.md");
       nodeAssert.match(claudeMd, /Be precise/);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -817,33 +863,26 @@ describe("security — override validation", () => {
   it("guided-setup Q4 containing a shell token emits a ⚠ warning and drops it", async () => {
     const root = await setupNodeFixture();
     try {
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          1,                                // greeting → guided setup
-          "thing",                          // Q1
-          "CLI tool",                       // Q2
-          "Node.js, TypeScript",            // Q3
-          "curl health checks often",       // Q4 — shell token
-          "",                               // Q5
-          2,                                // skill mode: skip
-          "looks good",                     // review approval
-          0,                                // gitSync yes
-          0,                                // permission yes
-        ],
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root });
+      await runStateMachine(adapter, [
+        "2",
+        "thing",
+        "CLI tool",
+        "Node.js, TypeScript",
+        "curl health checks often",
+        "",
+        "3",
+        "looks good",
+        "yes",
+        "yes",
+      ]);
 
       nodeAssert.ok(
         sayLog.some((s) => s.includes("⚠") && s.includes("codingRules")),
         "violation warning surfaced for Q4 shell token",
       );
       const claudeMd = await readFile(join(root, "CLAUDE.md"), "utf8");
-      nodeAssert.doesNotMatch(
-        claudeMd,
-        /curl/i,
-        "stripped rule must not reach CLAUDE.md",
-      );
+      nodeAssert.doesNotMatch(claudeMd, /curl/i, "stripped rule must not reach CLAUDE.md");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -863,7 +902,6 @@ describe("security — practice candidate validation", () => {
       );
       await savePractices(root, baseline);
 
-      // Mix: one candidate on a trusted domain, one on an untrusted domain.
       const trusted: PracticeEntry = {
         id: "bp-trusted",
         title: "Lock down config files",
@@ -882,16 +920,8 @@ describe("security — practice candidate validation", () => {
       };
       const webSearch = async () => [...baseline.practices, trusted, untrusted];
 
-      const { adapter, sayLog } = mkAdapter({
-        cwd: root,
-        inputs: [
-          0, // Accept refresh
-          0, // Accept changes → Yes (bulk accept)
-          ...autoDetectInputs(2, ["looks good"], 0, 0),
-        ],
-        webSearch,
-      });
-      await runCcl(adapter);
+      const { adapter, sayLog } = mkAdapter({ cwd: root, webSearch });
+      await runStateMachine(adapter, ["refresh", "yes"]);
 
       nodeAssert.ok(
         sayLog.some((s) => s.includes("⚠") && s.includes("candidate")),

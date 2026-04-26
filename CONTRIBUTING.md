@@ -114,6 +114,29 @@ One logical change per commit. Squash fixup commits before requesting review.
 
 ---
 
+## Security
+
+### Shell execution
+All external process calls must use `execFile` or `spawn` with an
+explicit array of arguments. Never use `exec`, `execSync`, or
+`spawn`/`spawnSync` with `shell: true`. A semgrep rule in
+`.semgrep/no-shell-exec.yml` enforces this and runs as a CI gate.
+
+Rationale: string-interpolated shell commands allow argument
+injection if any input is user- or LLM-controlled.
+
+### Temp file atomicity
+All file writes must follow the `.ccl-tmp-<random>` + `rename`
+pattern established in `scaffold.ts`. Never write to the final
+destination path directly.
+
+### Override validation
+Any string entering `buildScaffoldPlan` from an untrusted source
+(LLM response, file read, web search result) must pass through
+`validateScaffoldOverrides` first. See `override-validator.ts`.
+
+---
+
 ## Reporting bugs
 
 Use the bug report issue template. Include:
