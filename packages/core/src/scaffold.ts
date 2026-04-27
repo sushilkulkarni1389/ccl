@@ -698,6 +698,191 @@ function extractSkillStepsBlock(content: string): string | null {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Compact plan summary (table form). Full file content is shown on demand
+// via the drill-down handler in the plan_review step.
+// ────────────────────────────────────────────────────────────────────────────
+
+export function renderPlanSummary(plan: ScaffoldPlan): string {
+  const COL1 = Math.max(...plan.files.map((f) => f.path.length + 2)) + 4;
+  const DIVIDER = "─".repeat(66);
+  const header = `Here's what I'll create for ${plan.projectName}:\n`;
+  const colHeaders =
+    "  " + "File".padEnd(COL1) + "Summary";
+
+  const rows = plan.files.map((f) => {
+    const summary = summarizeFile(f);
+    const line1 = summary[0] ?? "";
+    const line2 = summary[1] ?? "";
+    const col1 = `  ${f.path}`.padEnd(COL1 + 2);
+    if (line2) {
+      return `${col1}${line1}\n${"".padEnd(COL1 + 2)}${line2}`;
+    }
+    return `${col1}${line1}`;
+  });
+
+  const footer = [
+    "",
+    'Type "ok" to proceed, a file name to see its full content,',
+    "or describe any changes you want.",
+  ].join("\n");
+
+  return [header, colHeaders, DIVIDER, ...rows, DIVIDER, footer].join("\n");
+}
+
+function summarizeFile(f: PlannedFile): [string, string?] {
+  const path = f.path;
+  const content = f.content;
+
+  if (path === "CLAUDE.md") {
+    return summarizeClaudeMd(content);
+  }
+  if (path === ".claude/settings.json") {
+    return summarizeSettingsJson(content);
+  }
+  if (path.startsWith(".claude/skills/")) {
+    return summarizeSkill(content);
+  }
+  if (path.startsWith(".claude/agents/")) {
+    return summarizeAgent(content);
+  }
+  if (path === ".claudeignore") {
+    return [`Excludes ${parseClaudeignoreGroups(content)}`];
+  }
+  if (
+    path === ".claude/ccl-practices.json" ||
+    path === ".claude/ccl-state.json"
+  ) {
+    return ["CCL internal — gitignored"];
+  }
+  const preview = content.trim().replace(/\s+/g, " ").slice(0, 80);
+  return [preview];
+}
+
+function summarizeClaudeMd(content: string): [string, string] {
+  const stack = parseStackBulletSummary(content);
+  const lines = content.split("\n").length;
+  return [`${stack}, commands, coding rules`, `(${lines} lines)`];
+}
+
+function parseStackBulletSummary(content: string): string {
+  const sectionMatch = content.match(/##\s+Stack\s*\n([\s\S]*?)(?=\n##\s|$)/);
+  if (!sectionMatch) return "Stack";
+  const block = sectionMatch[1] ?? "";
+  const items = [...block.matchAll(/^-\s+(.+)$/gm)]
+    .map((m) => (m[1] ?? "").trim())
+    .filter((s) => s.length > 0 && !s.startsWith("_"));
+  if (items.length === 0) return "Stack";
+  return items.slice(0, 3).join(", ");
+}
+
+function summarizeSettingsJson(content: string): [string, string] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return ["Permissions: default", "Hooks: none"];
+  }
+  return [
+    `Permissions: ${readAllowSummary(parsed)}`,
+    `Hooks: ${readHooksSummary(parsed)}`,
+  ];
+}
+
+function readAllowSummary(parsed: unknown): string {
+  const allow = (parsed as { permissions?: { allow?: unknown } } | null)
+    ?.permissions?.allow;
+  if (!Array.isArray(allow) || allow.length === 0) return "default";
+  const tools = allow
+    .filter((v): v is string => typeof v === "string")
+    .slice(0, 3);
+  if (tools.length === 0) return "default";
+  return allow.length > 3 ? `${tools.join(", ")}, ...` : tools.join(", ");
+}
+
+function readHooksSummary(parsed: unknown): string {
+  const hooks = (parsed as { hooks?: Record<string, unknown> } | null)?.hooks;
+  if (!hooks || typeof hooks !== "object") return "none";
+  const cmds: string[] = [];
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const grp of groups) {
+      const inner = (grp as { hooks?: unknown })?.hooks;
+      if (!Array.isArray(inner)) continue;
+      for (const h of inner) {
+        const cmd = (h as { command?: unknown })?.command;
+        if (typeof cmd === "string") cmds.push(cmd);
+      }
+    }
+  }
+  if (cmds.length === 0) return "none";
+  return cmds.slice(0, 3).join(", ");
+}
+
+function summarizeSkill(content: string): [string, string?] {
+  const desc = parseFrontmatterField(content, "description") ?? "";
+  const words = desc
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(" ");
+  const action = parseSkillFirstStepAction(content);
+  if (action !== null) return [`Triggers on ${words}`, action];
+  return [`Triggers on ${words}`];
+}
+
+function parseFrontmatterField(content: string, name: string): string | null {
+  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!fmMatch) return null;
+  const re = new RegExp(`^${name}:\\s*(.+)$`, "m");
+  const m = fmMatch[1]!.match(re);
+  if (!m) return null;
+  return (m[1] ?? "").trim();
+}
+
+function parseSkillFirstStepAction(content: string): string | null {
+  const block = extractSkillStepsBlock(content);
+  if (block === null) return null;
+  const code = block.match(/`([^`\n]+)`/);
+  if (code && code[1]) {
+    const first = code[1].trim().split(/\s+/)[0];
+    if (first) return `Runs \`${first}\``;
+  }
+  const firstStep = block.match(/^\s*\d+\.\s+(.+)$/m);
+  if (firstStep && firstStep[1]) {
+    return firstStep[1].trim().split(/\s+/).slice(0, 6).join(" ");
+  }
+  return null;
+}
+
+function summarizeAgent(content: string): [string, string] {
+  const model = parseFrontmatterField(content, "model") ?? "agent";
+  const scope = parseAgentScopeSummary(content);
+  return [
+    `${model}, read-only scan of ${scope}`,
+    "Returns structured JSON to orchestrator",
+  ];
+}
+
+function parseAgentScopeSummary(content: string): string {
+  const m = content.match(/Scope:\s*([^\n]+)/);
+  if (m && m[1]) return m[1].trim();
+  return "source files";
+}
+
+function parseClaudeignoreGroups(content: string): string {
+  const groups: string[] = [];
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("#")) continue;
+    const heading = trimmed.replace(/^#+\s*/, "").trim();
+    if (heading.length > 0) groups.push(heading);
+    if (groups.length === 4) break;
+  }
+  if (groups.length === 0) return "(no groups)";
+  return groups.join(", ");
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Executor + state manager
 // ────────────────────────────────────────────────────────────────────────────
 

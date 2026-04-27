@@ -29,7 +29,7 @@ import {
   renderDiffSummary,
   renderEstimatesDisplay,
   renderGitignoreAdditions,
-  renderPlanPreview,
+  renderPlanSummary,
   renderStateJson,
   renderViolationWarning,
   savePractices,
@@ -38,6 +38,7 @@ import {
   type DetectedProject,
   type GitRunner,
   type LlmCall,
+  type PlannedFile,
   type PracticeEntry,
   type PracticesContext,
   type PracticesDiff,
@@ -104,10 +105,10 @@ const Q4 = `Any constraints I should know about?
 Hint: e.g. coding style rules ("no default exports"), security requirements ("HIPAA compliant"), deployment environment ("AWS Lambda, no binaries > 5MB"), team conventions ("all PRs need two approvals"), performance targets
 Type your answer to continue.`;
 
-const Q5 = `Is there anything else about your project you'd like me to know before I build the plan? (press Enter to skip)
+const Q5 = `Is there anything else about your project you'd like me to know before I build the plan?
 
 Hint: e.g. known pitfalls, legacy decisions, team size, deadline pressure, things the AI should never do in this codebase
-Type your answer or press Enter to skip.`;
+Type your answer or "skip" to continue.`;
 
 const PLAN_REVIEW_PROMPT = `Type 'ok' to approve, or describe a change.`;
 
@@ -1315,7 +1316,7 @@ async function presentPlan(
   flow: "auto" | "guided",
 ): Promise<CclRunResult> {
   setStep(state, flow === "auto" ? "auto_detect_review" : "plan_review");
-  const preview = renderPlanPreview(plan);
+  const preview = renderPlanSummary(plan);
   const previewText =
     adapter.llmCall === undefined ? `${preview}${MSG_NO_LLM_FOOTER}` : preview;
   await adapter.say(previewText);
@@ -1344,6 +1345,17 @@ async function handlePlanReview(
     const detected = await detectProject(adapter.cwd);
     const plan = await buildPlanFromSidecar(adapter, detected, sidecar);
     return presentPlan(adapter, state, plan, flow);
+  }
+
+  // Drill-down: filename match before approval/change handling.
+  const detected = await detectProject(adapter.cwd);
+  const plan = await buildPlanFromSidecar(adapter, detected, sidecar);
+  const matched = matchPlanFileByName(plan, input);
+  if (matched) {
+    await adapter.say(renderPlanFileFullSection(matched));
+    await adapter.say('Any changes, or type "ok" to proceed.');
+    await writeState(adapter, state);
+    return { status: "awaiting_input" };
   }
 
   if (isApproval(input)) {
@@ -1376,9 +1388,48 @@ async function handlePlanReview(
 
   sidecar.overrides = nextOverrides;
   setSidecar(state, sidecar);
-  const detected = await detectProject(adapter.cwd);
-  const plan = await buildPlanFromSidecar(adapter, detected, sidecar);
-  return presentPlan(adapter, state, plan, flow);
+  const newPlan = await buildPlanFromSidecar(adapter, detected, sidecar);
+  return presentPlan(adapter, state, newPlan, flow);
+}
+
+const PLAN_FILE_SECTION_DIVIDER = "─".repeat(41);
+
+function matchPlanFileByName(
+  plan: ScaffoldPlan,
+  input: string,
+): PlannedFile | null {
+  const needle = input.trim().toLowerCase();
+  if (needle.length === 0) return null;
+  for (const f of plan.files) {
+    const last = f.path.toLowerCase().split("/").pop() ?? "";
+    if (last === needle) return f;
+  }
+  for (const f of plan.files) {
+    const last = f.path.toLowerCase().split("/").pop() ?? "";
+    if (last.includes(needle)) return f;
+  }
+  for (const f of plan.files) {
+    if (f.path.toLowerCase().includes(needle)) return f;
+  }
+  const firstWord = needle.split(/\s+/)[0] ?? "";
+  if (firstWord.length >= 3) {
+    for (const f of plan.files) {
+      if (f.path.toLowerCase().includes(firstWord)) return f;
+    }
+  }
+  return null;
+}
+
+function renderPlanFileFullSection(file: PlannedFile): string {
+  const title =
+    file.action === "gitignore-merge" ? `${file.path} additions` : file.path;
+  return [
+    PLAN_FILE_SECTION_DIVIDER,
+    ` ${title}`,
+    PLAN_FILE_SECTION_DIVIDER,
+    file.content.trimEnd(),
+    "",
+  ].join("\n");
 }
 
 async function buildPlanFromSidecar(

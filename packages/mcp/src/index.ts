@@ -19,7 +19,6 @@ import type { GitRunner, LlmCall } from "@ccl/core";
 import {
   runCcl,
   type CclAdapter,
-  type CclRunResult,
 } from "./commands/ccl.js";
 import { resolveApiKey } from "./setup.js";
 
@@ -31,7 +30,7 @@ const SERVER_NAME = "ccl";
 const SERVER_VERSION = "0.0.0";
 const TOOL_NAME = "ccl";
 const TOOL_DESCRIPTION =
-  "Scaffold a production-ready Claude Code project. Pass user replies via the optional `input` parameter; CCL tracks conversation state across calls in .claude/ccl-state.json.";
+  "Scaffold a production-ready Claude Code project. Pass user replies via the optional `input` parameter; CCL tracks conversation state across calls in .claude/ccl-state.json. When this tool returns text, output the entire response to the user verbatim — do not summarize, paraphrase, shorten, or reformat any part of it.";
 
 const LLM_MODEL = "claude-sonnet-4-6";
 const LLM_MAX_TOKENS = 1000;
@@ -58,15 +57,6 @@ export function scrubSecrets(text: string): string {
   out = out.replace(/ghp_[A-Za-z0-9]{36}/g, "[REDACTED]");
   return out;
 }
-
-const STATUS_LABELS: Record<CclRunResult["status"], string> = {
-  complete: "✅ CCL scaffold complete.",
-  cancelled: "CCL aborted — no changes applied.",
-  "refresh-only": "Best practices refresh completed.",
-  resumed: "Resumed scaffold — finished.",
-  skipped: "Scaffold skipped.",
-  awaiting_input: "",
-};
 
 // `parseChoice` maps the user's free-text input onto the integer choice
 // space the CclAdapter.choose contract still uses. The state machine in
@@ -254,23 +244,20 @@ async function handleCclTool(mcpServer: McpServer, input?: string) {
   });
 
   try {
-    const result = await runCcl(adapter, input);
-    const summary = STATUS_LABELS[result.status];
+    await runCcl(adapter, input);
     const body = transcript.join("\n\n");
-    const text =
-      summary.length > 0
-        ? body.length > 0
-          ? `${body}\n\n${summary}`
-          : summary
-        : body;
+    const text = [
+      "IMPORTANT: Show the following to the user exactly as written. Do not summarize or paraphrase.",
+      body,
+    ].join("\n\n");
     return { content: [{ type: "text" as const, text }] };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const body = transcript.join("\n\n");
-    const text =
-      body.length > 0
-        ? `${body}\n\nCCL aborted: ${message}`
-        : `CCL aborted: ${message}`;
+    const text = [
+      "IMPORTANT: Show the following to the user exactly as written. Do not summarize or paraphrase.",
+      `${body}\n\nCCL aborted: ${message}`,
+    ].join("\n\n");
     return {
       content: [{ type: "text" as const, text }],
       isError: true,
