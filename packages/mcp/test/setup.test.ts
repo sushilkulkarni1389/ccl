@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   __setKeyringStoreForTesting,
   dispatchCli,
+  listApiKey,
   removeApiKey,
   resolveApiKey,
   runSetup,
@@ -736,5 +737,174 @@ describe("API key — keychain integration", () => {
       await rm(root, { recursive: true, force: true });
       if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
     }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// API key — --list-key
+//
+// Covers all four cases defined in the spec:
+//   A) keychain only
+//   B) env var only
+//   C) both set (warning + env var precedence)
+//   D) nothing set
+// ──────────────────────────────────────────────────────────────────────────
+
+describe("API key — --list-key", () => {
+  beforeEach(() => {
+    mockKeychain.clear();
+  });
+
+  it("Case A — keychain only: prints masked key and storage location", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      mockKeychain.set("ccl:anthropic-api-key", "sk-ant-api03keychainvaluexK9f");
+      const stdout: string[] = [];
+      const code = await listApiKey({
+        stdout: (m) => stdout.push(m),
+        stderr: () => {},
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stdout.length, 1, "Case A prints exactly one line");
+      const line = stdout[0]!;
+      nodeAssert.ok(line.startsWith("Key set: "), `got: ${line}`);
+      nodeAssert.ok(
+        line.includes("sk-ant-api...xK9f"),
+        `mask must show first 10 + ... + last 4: ${line}`,
+      );
+      nodeAssert.ok(
+        !line.includes("keychainvalue"),
+        "raw key body must never appear in output",
+      );
+      nodeAssert.ok(
+        line.includes("(") && line.includes(")"),
+        `storage-location parenthetical present: ${line}`,
+      );
+    } finally {
+      if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("Case B — env var only: surfaces env var without using keychain", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    process.env["ANTHROPIC_API_KEY"] = "sk-ant-envvaluem2QpAAAAAAAA";
+    try {
+      const stdout: string[] = [];
+      const code = await listApiKey({
+        stdout: (m) => stdout.push(m),
+        stderr: () => {},
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stdout.length, 1);
+      nodeAssert.ok(
+        stdout[0]!.includes("Key set via environment variable"),
+        `got: ${stdout[0]}`,
+      );
+      nodeAssert.ok(
+        stdout[0]!.includes("ANTHROPIC_API_KEY"),
+        "env var name must appear",
+      );
+      nodeAssert.ok(
+        stdout[0]!.includes("keychain not used"),
+        "must clarify keychain not used",
+      );
+    } finally {
+      if (prev === undefined) delete process.env["ANTHROPIC_API_KEY"];
+      else process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("Case C — both set: warns env var takes precedence and shows both masked", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    process.env["ANTHROPIC_API_KEY"] = "sk-ant-envenvenvenvenvm2Qp";
+    try {
+      mockKeychain.set("ccl:anthropic-api-key", "sk-ant-api03keychainvaluexK9f");
+      const stdout: string[] = [];
+      const code = await listApiKey({
+        stdout: (m) => stdout.push(m),
+        stderr: () => {},
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stdout.length, 3, "Case C prints warning + two masked lines");
+      nodeAssert.ok(
+        stdout[0]!.includes("⚠"),
+        `first line must carry the warning sigil: ${stdout[0]}`,
+      );
+      nodeAssert.ok(
+        stdout[0]!.includes("env var takes precedence"),
+        `must state env var precedence: ${stdout[0]}`,
+      );
+      nodeAssert.ok(
+        stdout[1]!.includes("Keychain:") && stdout[1]!.includes("sk-ant-api...xK9f"),
+        `keychain line must show masked keychain key: ${stdout[1]}`,
+      );
+      nodeAssert.ok(
+        stdout[2]!.includes("Env var:") && stdout[2]!.includes("sk-ant-env...m2Qp"),
+        `env var line must show masked env var: ${stdout[2]}`,
+      );
+    } finally {
+      if (prev === undefined) delete process.env["ANTHROPIC_API_KEY"];
+      else process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("Case D — nothing set: prints help-style hint", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      const stdout: string[] = [];
+      const code = await listApiKey({
+        stdout: (m) => stdout.push(m),
+        stderr: () => {},
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stdout.length, 1);
+      nodeAssert.ok(
+        stdout[0]!.startsWith("No key set."),
+        `must lead with "No key set.": ${stdout[0]}`,
+      );
+      nodeAssert.ok(
+        stdout[0]!.includes("npx ccl --set-key"),
+        "must suggest the --set-key command",
+      );
+    } finally {
+      if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("--list-key CLI flag dispatches to listApiKey and exits 0", async () => {
+    const prev = process.env["ANTHROPIC_API_KEY"];
+    delete process.env["ANTHROPIC_API_KEY"];
+    try {
+      mockKeychain.set("ccl:anthropic-api-key", "sk-ant-api03cliflagrouted9999");
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const code = await dispatchCli(["--list-key"], {
+        stdout: (m) => stdout.push(m),
+        stderr: (m) => stderr.push(m),
+      });
+      nodeAssert.equal(code, 0);
+      nodeAssert.equal(stderr.length, 0);
+      nodeAssert.ok(
+        stdout.some((m) => m.startsWith("Key set:")),
+        `dispatchCli must route to Case A path: ${JSON.stringify(stdout)}`,
+      );
+    } finally {
+      if (prev !== undefined) process.env["ANTHROPIC_API_KEY"] = prev;
+    }
+  });
+
+  it("--help output includes the --list-key entry", async () => {
+    const stdout: string[] = [];
+    const code = await dispatchCli(["--help"], {
+      stdout: (m) => stdout.push(m),
+      stderr: () => {},
+    });
+    nodeAssert.equal(code, 0);
+    nodeAssert.ok(
+      stdout.some((m) => m.includes("--list-key")),
+      `--help must list --list-key: ${JSON.stringify(stdout)}`,
+    );
   });
 });

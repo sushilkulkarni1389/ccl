@@ -7,6 +7,14 @@
 
 ## 0. Changelog
 
+### v1.4 — 2026-04-27
+- **§3 `--list-key` implemented:** new setup command in setup.ts that
+  prints the masked active key and its storage location, or "No key set."
+  if none is configured. Surfaces ANTHROPIC_API_KEY env var too. Warns
+  if both keychain and env var are set (env var takes precedence).
+  Naming kept singular to match --set-key / --remove-key. Only one key
+  is supported at a time — multi-key routing is out of scope.
+
 ### v1.3 — 2026-04-25
 - **§5, §6, §8 Elicitation replaced:** all `elicitInput()` calls removed.
   The `/ccl` tool now accepts an optional `input?: string` parameter.
@@ -71,6 +79,16 @@ CCL (Claude Context Loader) is an MCP server that integrates directly into Claud
 ```bash
 npx ccl
 ```
+
+| Command | What it does |
+|---|---|
+| `npx ccl` | Register CCL as an MCP server in Claude Code config |
+| `npx ccl --set-key <key>` | Store Anthropic API key in OS keychain |
+| `npx ccl --remove-key` | Delete key from OS keychain |
+| `npx ccl --list-key` | Print masked key + storage location, or "No key set." |
+| `npx ccl --help` | Show this table |
+
+Only one key is active at a time. CCL does not route across multiple API accounts.
 
 **What this does:**
 1. Downloads and registers CCL as an MCP server in Claude Code config
@@ -770,6 +788,37 @@ Build in this order — each phase is independently testable:
 6. **`packages/mcp/src/index.ts`** — MCP server entry point
 7. **`packages/mcp/src/setup.ts`** — `npx ccl` registration logic
 8. **Integration testing** — full flow from `/ccl` to scaffolded project
+
+---
+
+## 23. Build & Distribution Notes
+
+**Always rebuild after source changes before testing via npx:**
+
+```bash
+cd packages/mcp && npm run build
+```
+
+`npx ccl` executes the compiled `dist/` output, not the TypeScript
+source directly. Changes to `src/setup.ts` or any other source file
+will not be reflected until the build step runs.
+
+**To verify a change is live:**
+
+```bash
+grep -n "<your change>" packages/mcp/dist/setup.js
+npx ccl --help
+```
+
+**If npx serves a stale version despite a clean dist/:**
+
+```bash
+npx clear-npx-cache
+```
+
+npx caches packages globally. If you are iterating on a locally
+linked version, clear this cache to force npx to pick up the
+latest build.
 
 ---
 

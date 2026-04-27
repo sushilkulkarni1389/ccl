@@ -108,20 +108,20 @@ An Anthropic API key unlocks:
 Get a key at console.anthropic.com, then:
 
 ```bash
-npx ccl --set-key sk-ant-...
+npx ccl --set-key sk-ant-...   # store key in OS keychain
+npx ccl --list-key             # confirm which key is active
+npx ccl --remove-key           # remove it later
 ```
 
-To remove it later:
+`--list-key` prints a masked key (`sk-ant-...xK9f`) and its storage
+location. If `ANTHROPIC_API_KEY` is set as an environment variable,
+`--list-key` surfaces that too. If both are set, it warns that the
+env var takes precedence.
 
-```bash
-npx ccl --remove-key
-```
-
-The key is stored exclusively in your OS keychain (macOS Keychain,
-Windows Credential Vault, libsecret on Linux) — it never lands in
-`claude.json` or any other on-disk file. For CI or headless environments
-without a keychain, set `ANTHROPIC_API_KEY` in the environment instead.
-Restart Claude Code after any key change.
+Only one key is supported at a time. The key is stored exclusively
+in your OS keychain (macOS Keychain, Windows Credential Vault,
+libsecret on Linux) — it never lands in `claude.json` or any
+other on-disk file. Restart Claude Code after any key change.
 
 ---
 

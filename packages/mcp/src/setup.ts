@@ -46,6 +46,15 @@ const MSG_KEY_SET_CLI = "✓ API key saved to system keychain.";
 
 const MSG_KEY_REMOVED_CLI = "✓ API key removed.";
 
+const MSG_NO_KEY_LIST =
+  "No key set. Run: npx ccl --set-key sk-ant-...";
+
+const MSG_ENV_ONLY =
+  "Key set via environment variable (ANTHROPIC_API_KEY) — keychain not used";
+
+const MSG_BOTH_WARNING =
+  "⚠  Both ANTHROPIC_API_KEY env var and a keychain entry exist — env var takes precedence";
+
 const MSG_KEY_MIGRATED =
   "✓ Migrated API key from claude.json to system keychain.";
 
@@ -54,6 +63,7 @@ const MSG_HELP = [
   "  npx ccl                    Register CCL as an MCP server",
   "  npx ccl --set-key <key>    Set your Anthropic API key",
   "  npx ccl --remove-key       Remove your Anthropic API key",
+  "  npx ccl --list-key         Show the masked active key + storage location",
   "  npx ccl --help             Show this help",
 ].join("\n");
 
@@ -364,6 +374,44 @@ export async function removeApiKey(configPath?: string): Promise<void> {
   cleanLegacyKeyFromConfig(configPath ?? defaultConfigPath());
 }
 
+export async function listApiKey(opts: KeyCommandOptions = {}): Promise<number> {
+  const stdout = opts.stdout ?? ((m: string) => process.stdout.write(m + "\n"));
+
+  let keychainKey: string | null = null;
+  try {
+    keychainKey = await keyringStore.get(KEYRING_SERVICE, KEYRING_ACCOUNT);
+  } catch {
+    // Keyring backend unavailable — treat as absent.
+  }
+
+  const envRaw = process.env[ANTHROPIC_KEY_ENV];
+  const envKey = envRaw && envRaw.length > 0 ? envRaw : null;
+
+  if (keychainKey && envKey) {
+    stdout(MSG_BOTH_WARNING);
+    stdout(`   Keychain: ${maskKey(keychainKey)}`);
+    stdout(`   Env var:  ${maskKey(envKey)}`);
+  } else if (keychainKey) {
+    stdout(`Key set: ${maskKey(keychainKey)}  (${keychainBackendName()})`);
+  } else if (envKey) {
+    stdout(MSG_ENV_ONLY);
+  } else {
+    stdout(MSG_NO_KEY_LIST);
+  }
+  return 0;
+}
+
+function maskKey(key: string): string {
+  if (key.length <= 14) return key;
+  return `${key.slice(0, 10)}...${key.slice(-4)}`;
+}
+
+function keychainBackendName(): string {
+  if (process.platform === "darwin") return "macOS Keychain";
+  if (process.platform === "win32") return "Windows Credential Vault";
+  return "libsecret";
+}
+
 export async function resolveApiKey(): Promise<string | undefined> {
   try {
     const stored = await keyringStore.get(KEYRING_SERVICE, KEYRING_ACCOUNT);
@@ -515,6 +563,14 @@ export async function dispatchCli(
     }
     stdout(MSG_KEY_REMOVED_CLI);
     return 0;
+  }
+  if (argv.includes("--list-key")) {
+    try {
+      return await listApiKey({ stdout, stderr });
+    } catch (err) {
+      stderr(ERR_UNEXPECTED(errorMessage(err)));
+      return 1;
+    }
   }
   const setupOpts: SetupOptions = { stdout, stderr };
   if (opts.configPath !== undefined) setupOpts.configPath = opts.configPath;
