@@ -115,8 +115,8 @@ const PLAN_REVIEW_PROMPT = `Type 'ok' to approve, or describe a change.`;
 const PLAN_REVIEW_PROMPT_NO_LLM = `Type 'ok' to approve. (Plan changes need ANTHROPIC_API_KEY.)`;
 
 const MSG_NO_LLM_FOOTER =
-  "\nℹ️  Skill generation and plan changes are unavailable — " +
-  "ANTHROPIC_API_KEY is not set.\n" +
+  "\nℹ️  Skills scaffolded from static templates. " +
+  "AI-enriched skill content and plan changes need ANTHROPIC_API_KEY.\n" +
   "To enable: run  npx ccl --set-key sk-ant-...  then restart Claude Code.";
 
 const MSG_NO_LLM_CHANGE_REQUEST =

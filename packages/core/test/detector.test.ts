@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { detectProject } from "../src/detector.js";
+import { detectProject, STACK_LABEL_PROJECT_TYPE_MAP } from "../src/detector.js";
 
 async function mkFixture(): Promise<string> {
   return mkdtemp(join(tmpdir(), "ccl-detector-"));
@@ -428,5 +428,211 @@ describe("detectProject — CI + Docker + env.example findings", () => {
     nodeAssert.equal(r.findings.hasDockerfile, true);
     nodeAssert.equal(r.findings.hasEnvExample, true);
     nodeAssert.equal(r.findings.hasCiConfig, true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// STACK_LABEL_PROJECT_TYPE_MAP — unit tests
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("STACK_LABEL_PROJECT_TYPE_MAP", () => {
+  it("maps fastify to rest-api", () => {
+    nodeAssert.equal(STACK_LABEL_PROJECT_TYPE_MAP["fastify"], "rest-api");
+  });
+
+  it("maps react to web-app", () => {
+    nodeAssert.equal(STACK_LABEL_PROJECT_TYPE_MAP["react"], "web-app");
+  });
+
+  it("maps commander to cli", () => {
+    nodeAssert.equal(STACK_LABEL_PROJECT_TYPE_MAP["commander"], "cli");
+  });
+
+  it("maps tsup to library", () => {
+    nodeAssert.equal(STACK_LABEL_PROJECT_TYPE_MAP["tsup"], "library");
+  });
+
+  it("does not contain unknown-inducing entries", () => {
+    for (const [, type] of Object.entries(STACK_LABEL_PROJECT_TYPE_MAP)) {
+      nodeAssert.notEqual(type, "unknown");
+    }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Second-pass refinement via doc extraction
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("detectProject — doc-only Fastify REST API (no package.json)", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    await write(
+      root,
+      "ARCHITECTURE.md",
+      [
+        "# Architecture",
+        "",
+        "This service is built with Fastify on Node.js.",
+        "It uses TypeScript, PostgreSQL for persistence, and Redis for caching.",
+        "Deployed on Kubernetes.",
+      ].join("\n"),
+    );
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("classifies as rest-api from doc content alone", async () => {
+    const r = await detectProject(root);
+    nodeAssert.equal(r.projectType, "rest-api");
+  });
+});
+
+describe("detectProject — doc-only React web app (no package.json)", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    await write(
+      root,
+      "ARCHITECTURE.md",
+      [
+        "# Architecture",
+        "",
+        "Frontend built with React and Tailwind CSS.",
+        "State managed via Zustand.",
+      ].join("\n"),
+    );
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("classifies as web-app from doc content alone", async () => {
+    const r = await detectProject(root);
+    nodeAssert.equal(r.projectType, "web-app");
+  });
+});
+
+describe("detectProject — doc content with no known framework (unknown stays unknown)", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    await write(
+      root,
+      "ARCHITECTURE.md",
+      [
+        "# Architecture",
+        "",
+        "This is a collection of utility scripts written in bash.",
+        "No external dependencies are used.",
+      ].join("\n"),
+    );
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("leaves projectType as unknown when no framework label matches", async () => {
+    const r = await detectProject(root);
+    nodeAssert.equal(r.projectType, "unknown");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// readExtraDocs — recursive walk
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("detectProject — extraDocs recursive walk: subdirectory .md is found", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    await write(
+      root,
+      "docs/ARCHITECTURE.md",
+      "# Architecture\n\nThis service uses Fastify and PostgreSQL.\n",
+    );
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("classifies as rest-api from docs/ARCHITECTURE.md (no package.json)", async () => {
+    const r = await detectProject(root);
+    nodeAssert.equal(r.projectType, "rest-api");
+    nodeAssert.ok(r.extraDocs.some((d) => d.filename.includes("ARCHITECTURE.md")));
+  });
+});
+
+describe("detectProject — extraDocs recursive walk: .git/ and .claude/ are skipped", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    // These must NOT be read — if they were, projectType would resolve to rest-api / web-app.
+    await write(root, ".git/ARCHITECTURE.md", "# Git internal\n\nFastify is used here.\n");
+    await write(root, ".claude/DESIGN.md", "# Claude internal\n\nReact frontend.\n");
+    // This plain file has no framework keywords — keeps projectType unknown.
+    await write(root, "docs/notes.md", "# Notes\n\nGeneral project notes.\n");
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("does not descend into .git/ or .claude/", async () => {
+    const r = await detectProject(root);
+    const filenames = r.extraDocs.map((d) => d.filename);
+    nodeAssert.ok(!filenames.some((f) => f.includes(".git")), ".git file must not appear");
+    nodeAssert.ok(!filenames.some((f) => f.includes(".claude")), ".claude file must not appear");
+    nodeAssert.equal(r.projectType, "unknown");
+  });
+});
+
+describe("detectProject — extraDocs recursive walk: total cap is respected", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    // 8 files × ~3001 chars = ~24008 chars — well above the 16,000-char total cap.
+    const chunk = "x".repeat(3000) + "\n";
+    for (let i = 0; i < 8; i++) {
+      await write(root, `docs/doc-${i}.md`, chunk);
+    }
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("total extraDocs content stays within 16,000 chars", async () => {
+    const r = await detectProject(root);
+    const total = r.extraDocs.reduce((sum, d) => sum + d.content.length, 0);
+    nodeAssert.ok(total <= 16000, `total=${total} exceeds 16,000`);
+  });
+});
+
+describe("detectProject — extraDocs recursive walk: priority ordering across subdirectories", () => {
+  let root: string;
+  before(async () => {
+    root = await mkFixture();
+    // Alphabetically last path, lowest priority basename.
+    await write(root, "zzz/other.md", "# Other\n\nSome doc.\n");
+    // Middle priority — CONTRIBUTING.md is index 2 in EXTRA_DOC_PRIORITY_NAMES.
+    await write(root, "aaa/CONTRIBUTING.md", "# Contributing\n\nHow to contribute.\n");
+    // Highest priority — ARCHITECTURE.md is index 0 in EXTRA_DOC_PRIORITY_NAMES.
+    await write(root, "docs/ARCHITECTURE.md", "# Architecture\n\nMain design.\n");
+  });
+  after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("ARCHITECTURE.md precedes CONTRIBUTING.md which precedes other.md", async () => {
+    const r = await detectProject(root);
+    const filenames = r.extraDocs.map((d) => d.filename);
+    const archIdx = filenames.findIndex((f) => f.includes("ARCHITECTURE.md"));
+    const contribIdx = filenames.findIndex((f) => f.includes("CONTRIBUTING.md"));
+    const otherIdx = filenames.findIndex((f) => f.includes("other.md"));
+    nodeAssert.ok(archIdx !== -1, "ARCHITECTURE.md should be present");
+    nodeAssert.ok(contribIdx !== -1, "CONTRIBUTING.md should be present");
+    nodeAssert.ok(otherIdx !== -1, "other.md should be present");
+    nodeAssert.ok(archIdx < contribIdx, "ARCHITECTURE.md must precede CONTRIBUTING.md");
+    nodeAssert.ok(contribIdx < otherIdx, "CONTRIBUTING.md must precede other.md");
   });
 });

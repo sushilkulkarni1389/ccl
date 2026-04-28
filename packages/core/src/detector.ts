@@ -32,6 +32,11 @@ export type ProjectType =
   | "data-pipeline"
   | "unknown";
 
+export interface ExtraDoc {
+  filename: string;
+  content: string;
+}
+
 export interface DetectedProject {
   rootDir: string;
   projectName: string;
@@ -41,6 +46,7 @@ export interface DetectedProject {
   commands: ProjectCommands;
   directories: DirectoryEntry[];
   readmeSnippet: string | null;
+  extraDocs: ExtraDoc[];
   existingCcl: ExistingCcl;
   findings: Findings;
 }
@@ -180,6 +186,236 @@ const IGNORED_TOP_LEVEL_DIRS = new Set([
   ".turbo",
   ".cache",
 ]);
+
+// ────────────────────────────────────────────────────────────────────────────
+// Doc-based stack keyword list (exported for use in scaffold.ts)
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface DocStackKeyword {
+  keyword: string;
+  label: string;
+}
+
+export const DOC_STACK_KEYWORDS: DocStackKeyword[] = [
+  // Languages
+  { keyword: "typescript", label: "TypeScript" },
+  { keyword: "javascript", label: "JavaScript" },
+  { keyword: "python", label: "Python" },
+  { keyword: "golang", label: "Go" },
+  { keyword: "rust", label: "Rust" },
+  { keyword: "flutter", label: "Flutter" },
+  { keyword: "dart", label: "Dart" },
+  // Node / JS ecosystem
+  { keyword: "node.js", label: "Node.js" },
+  { keyword: "nodejs", label: "Node.js" },
+  { keyword: "next.js", label: "Next.js" },
+  { keyword: "nextjs", label: "Next.js" },
+  { keyword: "react", label: "React" },
+  { keyword: "vue.js", label: "Vue" },
+  { keyword: "vuejs", label: "Vue" },
+  { keyword: "svelte", label: "Svelte" },
+  { keyword: "sveltekit", label: "SvelteKit" },
+  { keyword: "astro", label: "Astro" },
+  { keyword: "fastify", label: "Fastify" },
+  { keyword: "express.js", label: "Express" },
+  { keyword: "expressjs", label: "Express" },
+  { keyword: "nestjs", label: "NestJS" },
+  { keyword: "nest.js", label: "NestJS" },
+  { keyword: "hono", label: "Hono" },
+  { keyword: "prisma", label: "Prisma" },
+  { keyword: "drizzle orm", label: "Drizzle ORM" },
+  { keyword: "tailwind css", label: "Tailwind CSS" },
+  { keyword: "tailwindcss", label: "Tailwind CSS" },
+  { keyword: "vitest", label: "Vitest" },
+  { keyword: "jest", label: "Jest" },
+  // Python ecosystem
+  { keyword: "fastapi", label: "FastAPI" },
+  { keyword: "django", label: "Django" },
+  { keyword: "flask", label: "Flask" },
+  { keyword: "starlette", label: "Starlette" },
+  { keyword: "pydantic", label: "Pydantic" },
+  { keyword: "sqlalchemy", label: "SQLAlchemy" },
+  { keyword: "pytest", label: "pytest" },
+  // Rust ecosystem
+  { keyword: "axum", label: "Axum" },
+  { keyword: "actix-web", label: "Actix Web" },
+  { keyword: "actix web", label: "Actix Web" },
+  { keyword: "tokio", label: "Tokio" },
+  { keyword: "serde", label: "Serde" },
+  // Databases
+  { keyword: "postgresql", label: "PostgreSQL" },
+  { keyword: "postgres", label: "PostgreSQL" },
+  { keyword: "mongodb", label: "MongoDB" },
+  { keyword: "redis", label: "Redis" },
+  { keyword: "mysql", label: "MySQL" },
+  { keyword: "sqlite", label: "SQLite" },
+  { keyword: "elasticsearch", label: "Elasticsearch" },
+  { keyword: "kafka", label: "Kafka" },
+  { keyword: "rabbitmq", label: "RabbitMQ" },
+  // Cloud / infra
+  { keyword: "docker", label: "Docker" },
+  { keyword: "kubernetes", label: "Kubernetes" },
+  { keyword: "graphql", label: "GraphQL" },
+  { keyword: "grpc", label: "gRPC" },
+  { keyword: "amazon web services", label: "AWS" },
+  { keyword: "google cloud platform", label: "GCP" },
+  { keyword: "google cloud", label: "GCP" },
+  { keyword: "azure", label: "Azure" },
+];
+
+// ────────────────────────────────────────────────────────────────────────────
+// Stack label → project type fallback map
+//
+// Used when inferProjectType() returns "unknown" (no recognised manifest
+// dependencies) but stack labels derived from docs identify a framework.
+// Keys are lowercase; values must match ProjectType exactly.
+// Precedence order when multiple types match: rest-api > web-app > cli > library
+// ────────────────────────────────────────────────────────────────────────────
+
+export const STACK_LABEL_PROJECT_TYPE_MAP: Record<string, ProjectType> = {
+  // REST API frameworks
+  fastify: "rest-api",
+  express: "rest-api",
+  nestjs: "rest-api",
+  "nest.js": "rest-api",
+  hapi: "rest-api",
+  koa: "rest-api",
+  hono: "rest-api",
+  django: "rest-api",
+  fastapi: "rest-api",
+  flask: "rest-api",
+  starlette: "rest-api",
+  rails: "rest-api",
+  "spring boot": "rest-api",
+  "asp.net": "rest-api",
+  gin: "rest-api",
+  fiber: "rest-api",
+  actix: "rest-api",
+  "actix web": "rest-api",
+  axum: "rest-api",
+  // Web app frameworks
+  react: "web-app",
+  "next.js": "web-app",
+  nextjs: "web-app",
+  vue: "web-app",
+  "vue.js": "web-app",
+  nuxt: "web-app",
+  angular: "web-app",
+  svelte: "web-app",
+  sveltekit: "web-app",
+  remix: "web-app",
+  gatsby: "web-app",
+  astro: "web-app",
+  // CLI libraries
+  commander: "cli",
+  yargs: "cli",
+  click: "cli",
+  cobra: "cli",
+  clap: "cli",
+  oclif: "cli",
+  // Library bundlers
+  rollup: "library",
+  tsup: "library",
+  microbundle: "library",
+};
+
+const PROJECT_TYPE_PRECEDENCE: ProjectType[] = [
+  "rest-api",
+  "web-app",
+  "cli",
+  "library",
+];
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extra-doc scanner (freeform markdown docs beyond README)
+// ────────────────────────────────────────────────────────────────────────────
+
+const EXTRA_DOC_PRIORITY_NAMES = [
+  "ARCHITECTURE.md",
+  "ARCHITECTURE.MD",
+  "CONTRIBUTING.md",
+  "DESIGN.md",
+  "SPEC.md",
+  "OVERVIEW.md",
+];
+
+const README_FILE_NAMES = new Set([
+  "README.md",
+  "README.MD",
+  "readme.md",
+  "README",
+]);
+
+function truncateAtLine(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const slice = text.slice(0, maxChars);
+  const lastNewline = slice.lastIndexOf("\n");
+  return lastNewline > 0 ? slice.slice(0, lastNewline) : slice;
+}
+
+async function readExtraDocs(root: string): Promise<ExtraDoc[]> {
+  const SKIP_DIRS = new Set([".git", ".claude"]);
+
+  async function collectPaths(dir: string): Promise<string[]> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const results: string[] = [];
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) {
+          const sub = await collectPaths(join(dir, entry.name));
+          results.push(...sub);
+        }
+      } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+        results.push(join(dir, entry.name));
+      }
+    }
+    return results;
+  }
+
+  let allPaths: string[];
+  try {
+    allPaths = await collectPaths(root);
+  } catch {
+    return [];
+  }
+
+  const candidates = allPaths.filter((p) => !README_FILE_NAMES.has(basename(p)));
+
+  const priorityIndex = new Map(EXTRA_DOC_PRIORITY_NAMES.map((name, i) => [name, i]));
+  candidates.sort((a, b) => {
+    const pa = priorityIndex.get(basename(a)) ?? EXTRA_DOC_PRIORITY_NAMES.length;
+    const pb = priorityIndex.get(basename(b)) ?? EXTRA_DOC_PRIORITY_NAMES.length;
+    if (pa !== pb) return pa - pb;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+
+  const PER_FILE_CAP = 4000;
+  const TOTAL_CAP = 16000;
+  const docs: ExtraDoc[] = [];
+  let totalChars = 0;
+
+  for (const filePath of candidates) {
+    if (totalChars >= TOTAL_CAP) break;
+    const raw = await readText(filePath);
+    if (raw === null) continue;
+
+    let content = truncateAtLine(raw, PER_FILE_CAP);
+    if (totalChars + content.length > TOTAL_CAP) {
+      content = truncateAtLine(content, TOTAL_CAP - totalChars);
+    }
+    if (content.length === 0) break;
+
+    docs.push({ filename: filePath.slice(root.length + 1), content });
+    totalChars += content.length;
+  }
+
+  return docs;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Manifest readers
@@ -487,6 +723,31 @@ function any<T>(source: Set<T>, needles: Set<T>): boolean {
   return false;
 }
 
+function refineProjectType(
+  stack: string[],
+  extraDocs: ExtraDoc[],
+): ProjectType {
+  const matched = new Set<ProjectType>();
+
+  for (const label of stack) {
+    const type = STACK_LABEL_PROJECT_TYPE_MAP[label.toLowerCase()];
+    if (type !== undefined) matched.add(type);
+  }
+
+  if (extraDocs.length > 0) {
+    const content = extraDocs.map((d) => d.content).join("\n").toLowerCase();
+    for (const [key, type] of Object.entries(STACK_LABEL_PROJECT_TYPE_MAP)) {
+      if (content.includes(key)) matched.add(type);
+    }
+  }
+
+  for (const type of PROJECT_TYPE_PRECEDENCE) {
+    if (matched.has(type)) return type;
+  }
+
+  return "unknown";
+}
+
 async function scanDirectories(root: string): Promise<DirectoryEntry[]> {
   let entries: string[] = [];
   try {
@@ -600,7 +861,7 @@ export async function detectProject(
     throw new Error(`detectProject: directory does not exist: ${rootDir}`);
   }
 
-  const [pkg, py, go, rust, dart, hasTsconfig, rawReadmeSnippet, ccl, ciConfig, extraMonorepo] =
+  const [pkg, py, go, rust, dart, hasTsconfig, rawReadmeSnippet, ccl, ciConfig, extraMonorepo, extraDocs] =
     await Promise.all([
       readPackageJson(rootDir),
       readPyproject(rootDir),
@@ -612,6 +873,7 @@ export async function detectProject(
       detectExistingCcl(rootDir),
       detectCiConfig(rootDir),
       detectMonorepoMarker(rootDir),
+      readExtraDocs(rootDir),
     ]);
 
   // Sanitize the README snippet via the same boundary that guards LLM-supplied
@@ -636,6 +898,9 @@ export async function detectProject(
   const commands = inferCommands(manifests);
   let projectType = inferProjectType(manifests);
   if (extraMonorepo) projectType = "monorepo";
+  if (projectType === "unknown") {
+    projectType = refineProjectType(stack, extraDocs);
+  }
 
   const directories = await scanDirectories(rootDir);
 
@@ -672,6 +937,7 @@ export async function detectProject(
     commands,
     directories,
     readmeSnippet,
+    extraDocs,
     existingCcl: ccl,
     findings,
   };

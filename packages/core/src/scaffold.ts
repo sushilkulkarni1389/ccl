@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
 import type { DetectedProject, ProjectType } from "./detector.js";
+import { DOC_STACK_KEYWORDS } from "./detector.js";
 import { SHELL_TOKENS } from "./override-validator.js";
 import {
   CCL_GITIGNORE_MARKER_END,
@@ -158,8 +159,8 @@ function assertWithinRoot(root: string, filePath: string): void {
 // Default skills + agents per project type
 // ────────────────────────────────────────────────────────────────────────────
 
-export function defaultAgents(_type: ProjectType): AgentContext[] {
-  return [
+export function defaultAgents(type: ProjectType): AgentContext[] {
+  const baseline: AgentContext[] = [
     {
       name: "security-auditor",
       description:
@@ -195,6 +196,28 @@ export function defaultAgents(_type: ProjectType): AgentContext[] {
       role: "",
     },
   ];
+  const typeSpecific: Partial<Record<ProjectType, AgentContext[]>> = {
+    "rest-api": [
+      {
+        name: "api-contract-checker",
+        description:
+          "Audit REST routes for consistent HTTP methods, status codes, request/response schemas, and error handling before a PR.",
+        model: CCL_MODEL_ALIASES.haiku,
+        tools: ["Read", "Grep", "Glob"],
+        purpose:
+          "Scan route definitions and handler implementations for API contract issues. Use before opening a PR that touches routes, controllers, or schemas.",
+        outputFormat:
+          'JSON: { "findings": [{ "route": string, "method": string, "issue": string, "severity": "high|medium|low" }], "summary": string }',
+        constraints: [
+          "Read-only — no file writes",
+          "Returns structured JSON only",
+          "Scope: route files, controller files, schema definitions",
+        ],
+        role: "",
+      },
+    ],
+  };
+  return [...baseline, ...(typeSpecific[type] ?? [])];
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -464,6 +487,281 @@ function runPipelineSkill(): SkillContext {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Static doc extraction (no key) + LLM enrichment from docs (key present)
+// ────────────────────────────────────────────────────────────────────────────
+
+interface DocExtracted {
+  whatIsThis?: string;
+  stack?: string[];
+  commands?: Partial<ProjectCommands>;
+  directories?: DirectoryEntry[];
+}
+
+interface LlmEnrichment {
+  whatIsThis?: string;
+  stack?: string[];
+  devCommand?: string;
+  testCommand?: string;
+  buildCommand?: string;
+  lintCommand?: string;
+  whereThingsLive?: DirectoryEntry[];
+  codingRules?: string[];
+  testingPhilosophy?: string;
+  commonPitfalls?: string[];
+  gotchas?: string[];
+  neverDo?: string[];
+}
+
+function firstParagraphFromText(text: string): string | null {
+  const lines = text.split("\n");
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line === "") {
+      if (current.length) { paragraphs.push(current.join(" ").trim()); current = []; }
+      continue;
+    }
+    if (line.startsWith("#") || line.startsWith("!") || /^\[!\[/.test(line)) continue;
+    current.push(line);
+  }
+  if (current.length) paragraphs.push(current.join(" ").trim());
+  return paragraphs.find((p) => p.length > 20) ?? null;
+}
+
+function truncateToSentences(text: string, max: number): string {
+  const sentences = text.match(/[^.!?]*[.!?]+/g) ?? [];
+  if (sentences.length === 0) return text;
+  return sentences.slice(0, max).join("").trim();
+}
+
+function extractStackFromText(text: string): string[] {
+  const lower = text.toLowerCase();
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const { keyword, label } of DOC_STACK_KEYWORDS) {
+    if (seen.has(label)) continue;
+    if (lower.includes(keyword.toLowerCase())) {
+      found.push(label);
+      seen.add(label);
+    }
+  }
+  return found;
+}
+
+const COMMAND_EXTRACTION_PATTERNS: Array<{
+  type: keyof ProjectCommands;
+  patterns: RegExp[];
+}> = [
+  {
+    type: "dev",
+    patterns: [
+      /\b(npm run dev|npm start|yarn dev|pnpm dev|yarn start|pnpm start)\b/i,
+      /\b(go run \.(?:\/\.\.\.)?)\b/i,
+      /\b(cargo run)\b/i,
+      /\b(python -m \w[\w.]*)\b/i,
+      /\b(flutter run)\b/i,
+      /\b(dart run)\b/i,
+    ],
+  },
+  {
+    type: "test",
+    patterns: [
+      /\b(npm test|npm run test|yarn test|pnpm test|pnpm run test)\b/i,
+      /\b(go test \.\/\.\.\.)\b/i,
+      /\b(cargo test)\b/i,
+      /\b(pytest(?:\s+\S+)?)\b/i,
+      /\b(flutter test)\b/i,
+      /\b(dart test)\b/i,
+    ],
+  },
+  {
+    type: "build",
+    patterns: [
+      /\b(npm run build|yarn build|pnpm build|pnpm run build)\b/i,
+      /\b(go build \.\/\.\.\.)\b/i,
+      /\b(cargo build --release)\b/i,
+      /\b(python -m build)\b/i,
+      /\b(flutter build \w+)\b/i,
+      /\b(mvn (?:package|install))\b/i,
+      /\b(\.\/gradlew \w+)\b/i,
+    ],
+  },
+  {
+    type: "lint",
+    patterns: [
+      /\b(npm run lint|yarn lint|pnpm lint|pnpm run lint)\b/i,
+      /\b(go vet \.\/\.\.\.)\b/i,
+      /\b(cargo clippy)\b/i,
+      /\b(ruff check \.)\b/i,
+      /\b(flutter analyze)\b/i,
+      /\b(dart analyze)\b/i,
+      /\b(make lint)\b/i,
+    ],
+  },
+];
+
+function extractCommandsFromText(text: string): Partial<ProjectCommands> {
+  // Prefer commands found inside fenced code blocks
+  const codeBlocks: string[] = [];
+  const blockRe = /```(?:sh|bash|shell|zsh|console)?\n([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(text)) !== null) {
+    if (m[1]) codeBlocks.push(m[1]);
+  }
+  const searchText = codeBlocks.length > 0 ? codeBlocks.join("\n") : text;
+  const result: Partial<ProjectCommands> = {};
+  for (const { type, patterns } of COMMAND_EXTRACTION_PATTERNS) {
+    for (const pat of patterns) {
+      const hit = pat.exec(searchText);
+      if (hit?.[1]) { result[type] = hit[1].trim(); break; }
+    }
+  }
+  return result;
+}
+
+function extractDirectoriesFromText(text: string): DirectoryEntry[] {
+  const entries: DirectoryEntry[] = [];
+  const seen = new Set<string>();
+  // Match "name/ — description" (em-dash or hyphen)
+  const descRe = /^\s*[`*-]?\s*([a-z][a-z0-9_-]*\/)\s*[—–-]{1,3}\s*(.+)$/gim;
+  let m: RegExpExecArray | null;
+  while ((m = descRe.exec(text)) !== null && entries.length < 8) {
+    const dir = m[1]!.trim();
+    const desc = m[2]!.trim();
+    if (!seen.has(dir) && desc.length > 0) { entries.push({ dir, description: desc }); seen.add(dir); }
+  }
+  // Supplement from tree output when fewer than 4 entries found
+  if (entries.length < 4) {
+    const treeRe = /[├└]──\s+([a-z][a-z0-9_-]*)\//gim;
+    while ((m = treeRe.exec(text)) !== null && entries.length < 8) {
+      const dir = `${m[1]!}/`;
+      if (!seen.has(dir)) { entries.push({ dir, description: m[1]! }); seen.add(dir); }
+    }
+  }
+  return entries;
+}
+
+function extractFromDocs(detected: DetectedProject): DocExtracted {
+  if (detected.extraDocs.length === 0) return {};
+  const allContent = detected.extraDocs.map((d) => d.content).join("\n\n");
+  const result: DocExtracted = {};
+
+  if (detected.readmeSnippet === null) {
+    const firstDoc = detected.extraDocs[0];
+    if (firstDoc) {
+      const para = firstParagraphFromText(firstDoc.content);
+      if (para !== null) result.whatIsThis = truncateToSentences(para, 3);
+    }
+  }
+
+  const docStack = extractStackFromText(allContent);
+  if (docStack.length > 0) result.stack = docStack;
+
+  const docCmds = extractCommandsFromText(allContent);
+  if (Object.keys(docCmds).length > 0) result.commands = docCmds;
+
+  const docDirs = extractDirectoriesFromText(allContent);
+  if (docDirs.length > 0) result.directories = docDirs;
+
+  return result;
+}
+
+function parseLlmEnrichment(raw: string): LlmEnrichment {
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "").trim();
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    const result: LlmEnrichment = {};
+    if (typeof parsed["whatIsThis"] === "string") result.whatIsThis = parsed["whatIsThis"];
+    const strArr = (k: string): string[] | undefined => {
+      const v = parsed[k];
+      return Array.isArray(v) && v.every((s) => typeof s === "string") ? (v as string[]) : undefined;
+    };
+    const stack = strArr("stack");
+    if (stack !== undefined) result.stack = stack;
+    if (typeof parsed["devCommand"] === "string") result.devCommand = parsed["devCommand"];
+    if (typeof parsed["testCommand"] === "string") result.testCommand = parsed["testCommand"];
+    if (typeof parsed["buildCommand"] === "string") result.buildCommand = parsed["buildCommand"];
+    if (typeof parsed["lintCommand"] === "string") result.lintCommand = parsed["lintCommand"];
+    if (Array.isArray(parsed["whereThingsLive"])) {
+      const dirs: DirectoryEntry[] = [];
+      for (const item of parsed["whereThingsLive"] as unknown[]) {
+        const it = item as Record<string, unknown>;
+        if (typeof it["dir"] === "string" && typeof it["description"] === "string") {
+          dirs.push({ dir: it["dir"] as string, description: it["description"] as string });
+        }
+      }
+      if (dirs.length > 0) result.whereThingsLive = dirs;
+    }
+    const codingRules = strArr("codingRules");
+    if (codingRules !== undefined) result.codingRules = codingRules;
+    if (typeof parsed["testingPhilosophy"] === "string") result.testingPhilosophy = parsed["testingPhilosophy"];
+    const commonPitfalls = strArr("commonPitfalls");
+    if (commonPitfalls !== undefined) result.commonPitfalls = commonPitfalls;
+    const gotchas = strArr("gotchas");
+    if (gotchas !== undefined) result.gotchas = gotchas;
+    const neverDo = strArr("neverDo");
+    if (neverDo !== undefined) result.neverDo = neverDo;
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+async function enrichFromDocs(
+  detected: DetectedProject,
+  projectName: string,
+  currentStack: string[],
+  currentCommands: ProjectCommands,
+  llmCall: LlmCall,
+): Promise<LlmEnrichment> {
+  const docsText = detected.extraDocs
+    .map((d) => `### ${d.filename}\n\n${d.content}`)
+    .join("\n\n---\n\n");
+
+  const alreadyKnown = [
+    currentStack.length > 0 ? `Stack already detected from manifests: ${currentStack.join(", ")}` : null,
+    !currentCommands.dev.startsWith("# TODO:") ? `Dev command: ${currentCommands.dev}` : null,
+    !currentCommands.test.startsWith("# TODO:") ? `Test command: ${currentCommands.test}` : null,
+    !currentCommands.build.startsWith("# TODO:") ? `Build command: ${currentCommands.build}` : null,
+    !currentCommands.lint.startsWith("# TODO:") ? `Lint command: ${currentCommands.lint}` : null,
+  ].filter(Boolean).join("\n");
+
+  const prompt = [
+    `Project: ${projectName}`,
+    alreadyKnown.length > 0 ? `\nAlready detected from manifests:\n${alreadyKnown}` : "",
+    "",
+    "Documentation:",
+    docsText,
+    "",
+    "From the documentation above, populate ONLY fields you can fill with HIGH CONFIDENCE.",
+    "Omit any field you cannot fill confidently — do not guess or pad.",
+    "Return a single JSON object with these optional keys:",
+    '  "whatIsThis": string — 1-3 sentence description for a senior engineer joining cold',
+    '  "stack": string[] — technology names not already detected (e.g. ["Docker", "PostgreSQL"])',
+    '  "devCommand": string — exact shell command to start the dev server',
+    '  "testCommand": string — exact shell command to run tests',
+    '  "buildCommand": string — exact shell command to build',
+    '  "lintCommand": string — exact shell command to lint',
+    '  "whereThingsLive": [{"dir":"path/","description":"what it contains"}, ...] — up to 8 entries',
+    '  "codingRules": string[] — 3–8 concrete coding rules for this codebase',
+    '  "testingPhilosophy": string — 1 sentence describing the test strategy',
+    '  "commonPitfalls": string[] — 2–5 mistakes a new engineer hits quickly',
+    '  "gotchas": string[] — 2–5 non-obvious behaviours or constraints',
+    '  "neverDo": string[] — 2–5 patterns that are forbidden in this codebase',
+    "",
+    "JSON only — no prose, no markdown fences.",
+  ].filter((l) => l !== "").join("\n");
+
+  try {
+    const raw = await llmCall(prompt);
+    return parseLlmEnrichment(raw);
+  } catch {
+    return {};
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Plan builder
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -474,15 +772,39 @@ export async function buildScaffoldPlan(
 
   const projectName = overrides.projectName ?? detected.projectName;
   const projectType = overrides.projectType ?? detected.projectType;
-  const stack = overrides.stack ?? detected.stack;
-  const directories = overrides.directories ?? detected.directories;
+
+  // Static extraction from freeform docs (runs when no API key)
+  const docExtracted: DocExtracted =
+    !llmCall && detected.extraDocs.length > 0 ? extractFromDocs(detected) : {};
+
+  // Stack: merge manifest + doc findings; manifest order preserved
+  const manifestStack = detected.stack;
+  const docStack = docExtracted.stack ?? [];
+  const manifestSet = new Set(manifestStack);
+  const mergedStack = [...manifestStack, ...docStack.filter((s) => !manifestSet.has(s))];
+  const stack = overrides.stack ?? mergedStack;
+
+  // Directories: manifest > doc > empty
+  const directories =
+    overrides.directories ??
+    (detected.directories.length > 0
+      ? detected.directories
+      : (docExtracted.directories ?? detected.directories));
+
+  // Commands: fill # TODO: placeholders from doc extraction
+  const baseCommands: ProjectCommands = { ...detected.commands, ...overrides.commands };
+  const docCmds = docExtracted.commands ?? {};
   const commands: ProjectCommands = {
-    ...detected.commands,
-    ...overrides.commands,
+    dev: baseCommands.dev.startsWith("# TODO:") ? (docCmds.dev ?? baseCommands.dev) : baseCommands.dev,
+    test: baseCommands.test.startsWith("# TODO:") ? (docCmds.test ?? baseCommands.test) : baseCommands.test,
+    build: baseCommands.build.startsWith("# TODO:") ? (docCmds.build ?? baseCommands.build) : baseCommands.build,
+    lint: baseCommands.lint.startsWith("# TODO:") ? (docCmds.lint ?? baseCommands.lint) : baseCommands.lint,
   };
+
   const whatIsThis =
     overrides.whatIsThis ??
     detected.readmeSnippet ??
+    docExtracted.whatIsThis ??
     `${projectName} — add a one-paragraph description for a senior engineer joining cold.`;
 
   const skills = overrides.skills ?? defaultSkills(projectType);
@@ -507,6 +829,54 @@ export async function buildScaffoldPlan(
     neverDo: overrides.neverDo ?? [],
   };
 
+  // LLM enrichment from docs (runs when API key is present and extraDocs exist)
+  if (llmCall && detected.extraDocs.length > 0) {
+    const llmEnrichment = await enrichFromDocs(detected, projectName, stack, commands, llmCall);
+
+    // whatIsThis: only override the generated fallback, not a README snippet
+    if (llmEnrichment.whatIsThis && detected.readmeSnippet === null && overrides.whatIsThis === undefined) {
+      claudeCtx.whatIsThis = llmEnrichment.whatIsThis;
+    }
+    // Stack: append LLM additions not already present
+    if (llmEnrichment.stack && llmEnrichment.stack.length > 0) {
+      const existing = new Set(claudeCtx.stack);
+      claudeCtx.stack = [...claudeCtx.stack, ...llmEnrichment.stack.filter((s) => !existing.has(s))];
+    }
+    // Commands: fill remaining # TODO: placeholders
+    if (llmEnrichment.devCommand && claudeCtx.commands.dev.startsWith("# TODO:")) {
+      claudeCtx.commands = { ...claudeCtx.commands, dev: llmEnrichment.devCommand };
+    }
+    if (llmEnrichment.testCommand && claudeCtx.commands.test.startsWith("# TODO:")) {
+      claudeCtx.commands = { ...claudeCtx.commands, test: llmEnrichment.testCommand };
+    }
+    if (llmEnrichment.buildCommand && claudeCtx.commands.build.startsWith("# TODO:")) {
+      claudeCtx.commands = { ...claudeCtx.commands, build: llmEnrichment.buildCommand };
+    }
+    if (llmEnrichment.lintCommand && claudeCtx.commands.lint.startsWith("# TODO:")) {
+      claudeCtx.commands = { ...claudeCtx.commands, lint: llmEnrichment.lintCommand };
+    }
+    // Directories: only use LLM value when nothing was found by detector or doc extraction
+    if (llmEnrichment.whereThingsLive && claudeCtx.directories.length === 0 && overrides.directories === undefined) {
+      claudeCtx.directories = llmEnrichment.whereThingsLive;
+    }
+    // LLM-only fields (static extraction intentionally leaves these empty)
+    if (llmEnrichment.codingRules?.length && overrides.codingRules === undefined && claudeCtx.codingRules.length === 0) {
+      claudeCtx.codingRules = llmEnrichment.codingRules;
+    }
+    if (llmEnrichment.testingPhilosophy && overrides.testingPhilosophy === undefined) {
+      claudeCtx.testingPhilosophy = llmEnrichment.testingPhilosophy;
+    }
+    if (llmEnrichment.commonPitfalls?.length && overrides.commonPitfalls === undefined && claudeCtx.commonPitfalls.length === 0) {
+      claudeCtx.commonPitfalls = llmEnrichment.commonPitfalls;
+    }
+    if (llmEnrichment.gotchas?.length && overrides.gotchas === undefined && claudeCtx.gotchas.length === 0) {
+      claudeCtx.gotchas = llmEnrichment.gotchas;
+    }
+    if (llmEnrichment.neverDo?.length && overrides.neverDo === undefined && claudeCtx.neverDo.length === 0) {
+      claudeCtx.neverDo = llmEnrichment.neverDo;
+    }
+  }
+
   const files: PlannedFile[] = [];
 
   files.push({
@@ -530,12 +900,25 @@ export async function buildScaffoldPlan(
     content: renderSettingsLocalJson(),
   });
 
+  // Skills: apply static fallbacks when no API key is set
+  const isStaticSkillMode = !llmCall;
   for (const skill of skills) {
+    const skillCtx: SkillContext = isStaticSkillMode
+      ? {
+          ...skill,
+          steps: skill.steps.length > 0 ? skill.steps : ["Follow the skill description above."],
+          verification:
+            skill.verification.length > 0
+              ? skill.verification
+              : ["Confirm the task completed without errors."],
+          references: skill.references,
+        }
+      : skill;
     files.push({
       path: `.claude/skills/${skill.name}/SKILL.md`,
       stepName: `skills/${skill.name}`,
       action: "write",
-      content: renderSkillMd(skill),
+      content: renderSkillMd(skillCtx),
     });
   }
 
@@ -578,6 +961,7 @@ export async function buildScaffoldPlan(
     skills,
     agents,
     now: now.toISOString(),
+    ...(isStaticSkillMode ? { skillGenerationMode: "static" as const } : {}),
   };
 
   if (llmCall && skills.length > 0) {

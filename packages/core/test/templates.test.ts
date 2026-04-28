@@ -547,6 +547,7 @@ describe("scaffold plan includes settings.local.json", () => {
     },
     directories: [],
     readmeSnippet: null,
+    extraDocs: [],
     existingCcl: { hasClaudeMd: false, hasClaudeDir: false, practices: null },
     findings: {
       manifests: [],

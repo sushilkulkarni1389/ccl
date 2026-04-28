@@ -99,9 +99,10 @@ CCL will guide you from there. No flags. No config. No docs to read first.
 ## API Key (optional)
 
 CCL scaffolds everything without an API key — CLAUDE.md, skills,
-agents, settings, and hooks all work with static templates.
+agents, and settings all work with static templates.
 
 An Anthropic API key unlocks:
+- AI-enriched CLAUDE.md content drawn from your project documentation
 - AI-generated skill content tailored to your stack
 - Interactive plan changes ("make the deploy skill more cautious")
 
@@ -133,7 +134,7 @@ CCL outputs plain text and reads your next response as input — no dialog boxes
 
 ### Two ways to start
 
-**Auto-detect** — CCL reads your `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Dockerfile`, and CI config. It infers your stack, dev/test/build/lint commands, and project type, then builds a complete plan automatically.
+**Auto-detect** — CCL reads your `package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Dockerfile`, and CI config. It also recursively scans your project for markdown documentation (ARCHITECTURE.md, CONTRIBUTING.md, and any other .md files) to enrich stack detection and project type inference. It infers your stack, dev/test/build/lint commands, and project type, then builds a complete plan automatically.
 
 **Guided setup** — Five focused questions, answered one at a time. CCL fills in everything else with intelligent defaults.
 
@@ -232,7 +233,7 @@ All subagents are read-only by default. They return structured JSON summaries to
 }
 ```
 
-`ccl-validate-bash` runs before every shell command. `ccl-audit-write` logs every file write. These are the minimum viable security posture for agentic coding — CCL installs them by default, not as an option.
+`ccl-validate-bash` runs before every shell command. `ccl-audit-write` logs every file write. These are the minimum viable security posture for agentic coding — CCL registers them in `settings.json` by default, not as an option. The hook commands must be available on your PATH; CCL writes the configuration but does not install the binaries.
 
 Dangerous commands are blocked at the permission level:
 
@@ -361,7 +362,7 @@ Every pull request runs the following gates in order:
 | Shell injection | semgrep | exec/shell:true patterns in packages/ |
 | Dependency audit | npm audit | Any CVE at moderate severity or above |
 | Typecheck | tsc --strict | Any type error |
-| Tests | tsx --test | Any failing assertion (currently 264) |
+| Tests | tsx --test | Any failing assertion (currently 185) |
 
 Run them locally:
 

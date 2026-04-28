@@ -57,7 +57,7 @@ export interface SkillEngineEstimates {
   calibrationMultiplier: number;
 }
 
-export type SkillGenerationMode = "parallel" | "sequential" | "skip";
+export type SkillGenerationMode = "parallel" | "sequential" | "skip" | "static";
 
 export interface GeneratedSkill {
   skillName: string;
