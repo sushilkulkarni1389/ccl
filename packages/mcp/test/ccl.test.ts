@@ -17,7 +17,7 @@ import {
   savePractices,
   type LlmCall,
   type PracticeEntry,
-} from "@ccl/core";
+} from "@sushilkulkarni1389/ccl-core";
 
 // ──────────────────────────────────────────────────────────────────────────
 // Test fixtures + adapter factory (v1.3 — state machine)

@@ -14,7 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import type { GitRunner, LlmCall } from "@ccl/core";
+import type { GitRunner, LlmCall } from "@sushilkulkarni1389/ccl-core";
 
 import {
   runCcl,

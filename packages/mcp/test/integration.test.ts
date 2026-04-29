@@ -20,7 +20,7 @@ import {
   loadPractices,
   savePractices,
   type PracticeEntry,
-} from "@ccl/core";
+} from "@sushilkulkarni1389/ccl-core";
 import { OfflineError } from "../src/commands/ccl.js";
 import { runSetup } from "../src/setup.js";
 

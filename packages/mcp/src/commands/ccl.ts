@@ -9,7 +9,7 @@
 //   3. Return CclRunResult — `awaiting_input` for mid-conversation turns,
 //      a terminal status (complete / cancelled / skipped / resumed /
 //      refresh-only) when the conversation ends.
-// All intelligence lives in @ccl/core. This file is the conversation layer.
+// All intelligence lives in @sushilkulkarni1389/ccl-core. This file is the conversation layer.
 // ────────────────────────────────────────────────────────────────────────────
 
 import { writeFile, mkdir, stat } from "node:fs/promises";
@@ -48,7 +48,7 @@ import {
   type SkillGenerationMode,
   type StateContext,
   type StateStep,
-} from "@ccl/core";
+} from "@sushilkulkarni1389/ccl-core";
 
 // ────────────────────────────────────────────────────────────────────────────
 // User-facing strings — all consolidated here.

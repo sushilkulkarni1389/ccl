@@ -19,7 +19,7 @@ import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 
-import { FILE_MODE_PRIVATE } from "@ccl/core";
+import { FILE_MODE_PRIVATE } from "@sushilkulkarni1389/ccl-core";
 
 // ────────────────────────────────────────────────────────────────────────────
 // User-facing strings

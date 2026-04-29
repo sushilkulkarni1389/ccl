@@ -1,5 +1,5 @@
 {
-  "name": "@ccl/mcp",
+  "name": "@sushilkulkarni1389/ccl-mcp",
   "version": "0.0.0",
   "description": "CCL MCP server — /ccl command handler and npx ccl setup.",
   "license": "MIT",
@@ -32,7 +32,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.30.1",
-    "@ccl/core": "*",
+    "@sushilkulkarni1389/ccl-core": "*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@napi-rs/keyring": "^1.2.0"
   },

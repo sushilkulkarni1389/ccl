@@ -36,10 +36,10 @@ jobs:
         run: npm audit --audit-level=moderate
         working-directory: .
 
-      - name: Build @ccl/core
+      - name: Build @sushilkulkarni1389/ccl-core
         run: npm run build -w packages/core
 
-      - name: Build @ccl/mcp
+      - name: Build @sushilkulkarni1389/ccl-mcp
         run: npm run build -w packages/mcp
 
       - name: Semgrep security scan

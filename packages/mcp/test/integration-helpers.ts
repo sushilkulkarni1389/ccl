@@ -20,7 +20,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import type { LlmCall, PracticeEntry } from "@ccl/core";
+import type { LlmCall, PracticeEntry } from "@sushilkulkarni1389/ccl-core";
 
 import {
   runCcl,
