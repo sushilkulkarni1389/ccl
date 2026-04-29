@@ -47,6 +47,7 @@ import {
   type ScaffoldPlan,
   type SkillGenerationMode,
   type StateContext,
+  type StateStep,
 } from "@ccl/core";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -395,7 +396,7 @@ async function chooseInitialStep(
 
 function hasInterruptedScaffoldShape(state: StateContext): boolean {
   if (state.status === "complete") return false;
-  return state.steps.some((s) => s.status === "done");
+  return state.steps.some((s: StateStep) => s.status === "done");
 }
 
 async function isRefreshDuePreGreeting(adapter: CclAdapter): Promise<boolean> {
@@ -514,7 +515,7 @@ function isApproval(text: string): boolean {
 
 function applyGitSyncToPlan(plan: ScaffoldPlan, gitSync: boolean): void {
   plan.gitSync = gitSync;
-  const gitignoreStep = plan.files.find((f) => f.path === ".gitignore");
+  const gitignoreStep = plan.files.find((f: PlannedFile) => f.path === ".gitignore");
   if (gitignoreStep) {
     gitignoreStep.content = renderGitignoreAdditions({
       syncStateToGit: gitSync,
@@ -744,9 +745,9 @@ async function handleInterruptedPermission(
   applyGitSyncToPlan(plan, state.gitSync);
 
   const doneStepNames = new Set(
-    state.steps.filter((s) => s.status === "done").map((s) => s.name),
+    state.steps.filter((s: StateStep) => s.status === "done").map((s: StateStep) => s.name),
   );
-  plan.files = plan.files.filter((f) => !doneStepNames.has(f.stepName));
+  plan.files = plan.files.filter((f: PlannedFile) => !doneStepNames.has(f.stepName));
 
   if (plan.files.length === 0) {
     await adapter.say(RESUMING_ALREADY_DONE);
@@ -1082,11 +1083,11 @@ async function getReviewItems(
   const { valid } = validatePracticeCandidates(raw, now);
   const diff = computePracticesDiff(current.practices, valid);
   return [
-    ...diff.added.map((e): ReviewItem => ({ kind: "added", entry: e })),
+    ...diff.added.map((e: PracticeEntry): ReviewItem => ({ kind: "added", entry: e })),
     ...diff.modified.map(
-      (m): ReviewItem => ({ kind: "modified", entry: m.after }),
+      (m: { before: PracticeEntry; after: PracticeEntry }): ReviewItem => ({ kind: "modified", entry: m.after }),
     ),
-    ...diff.removed.map((e): ReviewItem => ({ kind: "removed", entry: e })),
+    ...diff.removed.map((e: PracticeEntry): ReviewItem => ({ kind: "removed", entry: e })),
   ];
 }
 
@@ -1639,17 +1640,17 @@ async function doExecute(
 
   return executeScaffoldPlan(plan, {
     ...(wrappedLlm !== undefined ? { llmCall: wrappedLlm } : {}),
-    onStepStart: (step) => {
+    onStepStart: (step: string) => {
       if (step.startsWith("skills/") && hasSkillGeneration) {
         void adapter.say(`  ⟳ ${step}  (generating...)`);
         return;
       }
       void adapter.say(`  ⟳ ${step}`);
     },
-    onStepDone: (step) => {
+    onStepDone: (step: string) => {
       void adapter.say(`  ✓ ${step}`);
     },
-    onSkillGenerationProgress: (skillName, index, total) => {
+    onSkillGenerationProgress: (skillName: string, index: number, total: number) => {
       void adapter.say(`  ✓ ${skillName}  (${index + 1}/${total})`);
     },
     ...(adapter.runGitCommand !== undefined
@@ -1672,7 +1673,7 @@ function wrapLlmCallForSkillGeneration(
   inner: LlmCall,
   stats: SkillGenStats,
 ): LlmCall {
-  return async (prompt, systemPrompt) => {
+  return async (prompt: string, systemPrompt?: string) => {
     try {
       return await inner(prompt, systemPrompt);
     } catch (err) {

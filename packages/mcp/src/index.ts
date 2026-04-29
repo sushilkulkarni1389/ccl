@@ -149,7 +149,7 @@ export function buildLlmCall(
   };
 }
 
-const spawnGit: GitRunner = (args, cwd) =>
+const spawnGit: GitRunner = (args: string[], cwd: string) =>
   new Promise((resolve) => {
     const child = spawn("git", args, { cwd, stdio: "ignore" });
     child.once("error", () => resolve(1));

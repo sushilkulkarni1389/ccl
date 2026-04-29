@@ -36,6 +36,9 @@ jobs:
         run: npm audit --audit-level=moderate
         working-directory: .
 
+      - name: Build @ccl/core
+        run: npm run build -w packages/core
+
       # Hard gate: blocks shell-interpolation patterns. Run before
       # typecheck/test so it fails fast. Note: semgrep is not assumed
       # to be installed locally — contributors validate via the action.
