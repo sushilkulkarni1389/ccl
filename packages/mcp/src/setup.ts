@@ -190,12 +190,14 @@ export function defaultConfigPath(): string {
   const primary = resolve(homedir(), ".claude", "claude.json");
   if (existsSync(primary)) return primary;
 
-  const platformPath = platformSpecificPath();
-  if (platformPath && existsSync(platformPath)) return platformPath;
-
   return primary;
 }
 
+// platformSpecificPath resolves OS-standard application data directories
+// (macOS ~/Library/Application Support, Windows %APPDATA%, Linux XDG).
+// These are used by the Claude desktop app (Electron), not the Claude Code
+// CLI — CLI users store config at ~/.claude.json or ~/.claude/claude.json.
+// Intentionally not called from defaultConfigPath() for CLI deployments.
 function platformSpecificPath(): string | null {
   if (process.platform === "darwin") {
     return resolve(

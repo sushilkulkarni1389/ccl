@@ -4,28 +4,13 @@
 
 ---
 
-<!--
-  DEMO VIDEO PLACEHOLDER
-  Suggested recording: 60–90 second screen capture showing:
-    1. Running `npx ccl` in terminal
-    2. Typing `/ccl` in Claude Code → greeting screen appears
-    3. Selecting Auto-Detect → CCL scanning the directory
-    4. The full plan appearing (CLAUDE.md content, skills, agents)
-    5. User saying "looks good" → files being written
-    6. Final completion summary
-
-  Aspect ratio: 16:9 | Resolution: 1280×720 minimum
--->
-
-[![CCL Demo](https://placehold.co/1280x720/0a0a0a/ffffff?text=▶+Demo+Video+Coming+Soon)](https://github.com/your-org/ccl)
-
-🌐 [Website](https://your-org.github.io/ccl)
+🌐 [Website](https://your-org.github.ioccl)
 
 ---
 
 ## What is CCL?
 
-CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx ccl`, then type `/ccl` in any project — CCL scans your codebase, builds a tailored scaffold plan, shows you every file it will create before writing anything, and then executes in one shot.
+CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx ccl`, then type `ccl` in any project — CCL scans your codebase, builds a tailored scaffold plan, shows you every file it will create before writing anything, and then executes in one shot.
 
 **What you get:**
 - A `CLAUDE.md` written as a staff-engineer onboarding doc (≤200 lines, always)
@@ -40,7 +25,7 @@ CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx
 ## Screenshots
 
 <!--
-  SCREENSHOT 1 — /ccl greeting screen
+  SCREENSHOT 1 — ccl greeting screen
   Show: The opening prompt in Claude Code with the two options:
   [1] Auto-detect and [2] Guided setup. Dark terminal background.
 -->
@@ -89,7 +74,7 @@ cd your-project
 claude
 
 # 3. Type this
-/ccl
+ccl
 ```
 
 CCL will guide you from there. No flags. No config. No docs to read first.
@@ -130,7 +115,7 @@ other on-disk file. Restart Claude Code after any key change.
 
 ### How you respond
 
-CCL outputs plain text and reads your next response as input — no dialog boxes, no timeouts. Type your answer in the Claude Code prompt and call /ccl again.
+CCL outputs plain text and reads your next response as input — no dialog boxes, no timeouts. Type your answer in the Claude Code prompt and call ccl again.
 
 ### Two ways to start
 
@@ -260,7 +245,7 @@ All elicitation responses are scrubbed for high-entropy strings and known secret
 
 CCL ships with 30 curated best practices drawn from Anthropic's Claude Code documentation and the broader Claude Code community. They cover `CLAUDE.md` structure, model routing, subagent patterns, skill activation, four-phase workflow, context window management, and more.
 
-Every seven days, on the next `/ccl` invocation, CCL offers to refresh:
+Every seven days, on the next `ccl` invocation, CCL offers to refresh:
 
 ```
 📦 It's been 7 days since your best practices were last checked.
@@ -278,7 +263,7 @@ CCL performs a web search, diffs against the current `ccl-practices.json`, and p
 
 ## Interrupted Scaffolds
 
-If a scaffold is interrupted, CCL detects it on the next `/ccl` and offers to continue:
+If a scaffold is interrupted, CCL detects it on the next `ccl` and offers to continue:
 
 ```
 ⚠️  It looks like a previous scaffold was interrupted.
@@ -344,7 +329,7 @@ ccl/
 │           ├── index.ts        ← MCP server entry point
 │           ├── setup.ts        ← npx ccl registration logic
 │           └── commands/
-│               └── ccl.ts      ← /ccl command handler
+│               └── ccl.ts      ← ccl command handler
 ├── CONTRIBUTING.md
 ├── LICENSE                     ← MIT
 └── README.md
@@ -386,3 +371,7 @@ The lock file (`package-lock.json`) is committed to the repo — always run `npm
 ## License
 
 MIT © CCL contributors
+
+---
+
+> 🤖 Built using Claude. Runs in Claude. Makes Claude more powerful.

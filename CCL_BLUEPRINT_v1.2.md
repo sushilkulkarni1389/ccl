@@ -105,6 +105,15 @@ Only one key is active at a time. CCL does not route across multiple API account
 - All file operations happen inside the user's project directory only
 - MCP server runs locally — no external calls except web search during best practices refresh
 
+**Config path resolution:**
+
+CCL detects the Claude Code CLI config file using this priority order:
+1. `~/.claude.json`        — flat file (Claude Code CLI default on all platforms)
+2. `~/.claude/claude.json` — directory form (fallback)
+3. Create `~/.claude/claude.json` if neither exists
+
+The platform-specific application data directories (macOS `~/Library/Application Support`, Windows `%APPDATA%`, Linux XDG) are used by the Claude desktop app (Electron), not the Claude Code CLI. CCL does not check these paths.
+
 ---
 
 ## 4. Entry Point — `/ccl`
@@ -819,6 +828,14 @@ npx clear-npx-cache
 npx caches packages globally. If you are iterating on a locally
 linked version, clear this cache to force npx to pick up the
 latest build.
+
+**Config path detection:** `npx ccl` resolves the Claude config file via
+`defaultConfigPath()` in setup.ts. It checks `~/.claude.json` first (flat file,
+used by Claude Code CLI on all platforms), then `~/.claude/claude.json`. The
+platform-specific desktop app paths (Application Support, APPDATA, XDG) are
+intentionally not checked — they target the Electron desktop app, not the CLI.
+If a user reports that registration wrote to the wrong file, check
+`defaultConfigPath()` first.
 
 ---
 
