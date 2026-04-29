@@ -184,6 +184,9 @@ export function __setKeyringStoreForTesting(store: KeyringStore | null): void {
 // ────────────────────────────────────────────────────────────────────────────
 
 export function defaultConfigPath(): string {
+  const flat = resolve(homedir(), ".claude.json");
+  if (existsSync(flat)) return flat;
+
   const primary = resolve(homedir(), ".claude", "claude.json");
   if (existsSync(primary)) return primary;
 
