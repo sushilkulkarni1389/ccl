@@ -39,12 +39,10 @@ jobs:
       - name: Build @ccl/core
         run: npm run build -w packages/core
 
-      # Hard gate: blocks shell-interpolation patterns. Run before
-      # typecheck/test so it fails fast. Note: semgrep is not assumed
-      # to be installed locally — contributors validate via the action.
-      - uses: returntocorp/semgrep-action@v1
-        with:
-          config: .semgrep/no-shell-exec.yml
+      - name: Semgrep security scan
+        run: |
+          pip install semgrep --quiet
+          semgrep --config .semgrep/no-shell-exec.yml packages/ --error
 
       - run: npm run typecheck
 

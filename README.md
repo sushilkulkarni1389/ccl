@@ -347,7 +347,7 @@ Every pull request runs the following gates in order:
 | Shell injection | semgrep | exec/shell:true patterns in packages/ |
 | Dependency audit | npm audit | Any CVE at moderate severity or above |
 | Typecheck | tsc --strict | Any type error |
-| Tests | tsx --test | Any failing assertion (currently 185) |
+| Tests | tsx --test | Any failing assertion (currently 280) |
 
 Run them locally:
 
