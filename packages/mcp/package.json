@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test --import tsx test/**/*.test.ts"
+    "test": "node --test --import tsx test/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.30.1",
