@@ -36,7 +36,7 @@ const MSG_RESTART =
 
 const MSG_NO_KEY_HINT =
   "\nℹ️  For skill generation and plan customization, set your API key:\n" +
-  "     npx ccl --set-key sk-ant-...\n" +
+  "     npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...\n" +
   "     Without it, CCL scaffolds everything using static templates.";
 
 const MSG_KEY_AUTO_WIRED =
@@ -47,7 +47,7 @@ const MSG_KEY_SET_CLI = "✓ API key saved to system keychain.";
 const MSG_KEY_REMOVED_CLI = "✓ API key removed.";
 
 const MSG_NO_KEY_LIST =
-  "No key set. Run: npx ccl --set-key sk-ant-...";
+  "No key set. Run: npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...";
 
 const MSG_ENV_ONLY =
   "Key set via environment variable (ANTHROPIC_API_KEY) — keychain not used";
@@ -60,11 +60,11 @@ const MSG_KEY_MIGRATED =
 
 const MSG_HELP = [
   "Usage:",
-  "  npx ccl                    Register CCL as an MCP server",
-  "  npx ccl --set-key <key>    Set your Anthropic API key",
-  "  npx ccl --remove-key       Remove your Anthropic API key",
-  "  npx ccl --list-key         Show the masked active key + storage location",
-  "  npx ccl --help             Show this help",
+  "  npx @sushilkulkarni1389/ccl-mcp                    Register CCL as an MCP server",
+  "  npx @sushilkulkarni1389/ccl-mcp --set-key <key>    Set your Anthropic API key",
+  "  npx @sushilkulkarni1389/ccl-mcp --remove-key       Remove your Anthropic API key",
+  "  npx @sushilkulkarni1389/ccl-mcp --list-key         Show the masked active key + storage location",
+  "  npx @sushilkulkarni1389/ccl-mcp --help             Show this help",
 ].join("\n");
 
 const ERR_NODE_VERSION =
@@ -72,11 +72,11 @@ const ERR_NODE_VERSION =
 
 const ERR_MALFORMED_CONFIG = (path: string): string =>
   `✗ Could not parse Claude Code config at ${path}. ` +
-  `Fix or delete the file and run npx ccl again.`;
+  `Fix or delete the file and run npx @sushilkulkarni1389/ccl-mcp again.`;
 
 const ERR_PERMISSION = (path: string): string =>
   `✗ Permission denied writing to ${path}. ` +
-  `Check file permissions and run npx ccl again.`;
+  `Check file permissions and run npx @sushilkulkarni1389/ccl-mcp again.`;
 
 const ERR_UNEXPECTED = (msg: string): string =>
   `✗ Unexpected error during CCL setup: ${msg}`;

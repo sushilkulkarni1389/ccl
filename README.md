@@ -10,7 +10,7 @@
 
 ## What is CCL?
 
-CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx ccl`, then type `ccl` in any project — CCL scans your codebase, builds a tailored scaffold plan, shows you every file it will create before writing anything, and then executes in one shot.
+CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx @sushilkulkarni1389/ccl-mcp`, then type `ccl` in any project — CCL scans your codebase, builds a tailored scaffold plan, shows you every file it will create before writing anything, and then executes in one shot.
 
 **What you get:**
 - A `CLAUDE.md` written as a staff-engineer onboarding doc (≤200 lines, always)
@@ -63,11 +63,11 @@ CCL is an MCP server that plugs directly into Claude Code. Run it once with `npx
 
 ## Quick Start
 
-**Requirements:** Node.js 18+ · Claude Code · API key storage uses the OS keychain (macOS Keychain, Windows Credential Vault, libsecret on Linux). On Linux, install libsecret-1-dev before running npx ccl.
+**Requirements:** Node.js 18+ · Claude Code · API key storage uses the OS keychain (macOS Keychain, Windows Credential Vault, libsecret on Linux). On Linux, install libsecret-1-dev before running npx @sushilkulkarni1389/ccl-mcp.
 
 ```bash
 # 1. Register CCL as an MCP server (one time only)
-npx ccl
+npx @sushilkulkarni1389/ccl-mcp
 
 # 2. Open Claude Code in your project
 cd your-project
@@ -94,9 +94,9 @@ An Anthropic API key unlocks:
 Get a key at console.anthropic.com, then:
 
 ```bash
-npx ccl --set-key sk-ant-...   # store key in OS keychain
-npx ccl --list-key             # confirm which key is active
-npx ccl --remove-key           # remove it later
+npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...   # store key in OS keychain
+npx @sushilkulkarni1389/ccl-mcp --list-key             # confirm which key is active
+npx @sushilkulkarni1389/ccl-mcp --remove-key           # remove it later
 ```
 
 `--list-key` prints a masked key (`sk-ant-...xK9f`) and its storage
@@ -233,8 +233,8 @@ See [SECURITY.md](SECURITY.md) for the full trust boundary model.
 CCL stores your Anthropic API key exclusively in the OS keychain (macOS Keychain, Windows Credential Vault, libsecret on Linux) — never in `claude.json`. Set it once with:
 
 ```bash
-npx ccl --set-key sk-ant-...
-npx ccl --remove-key        # to remove it later
+npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...
+npx @sushilkulkarni1389/ccl-mcp --remove-key        # to remove it later
 ```
 
 All elicitation responses are scrubbed for high-entropy strings and known secret patterns before they are written to the MCP audit log.
@@ -327,7 +327,7 @@ ccl/
 │   └── mcp/                    ← MCP server
 │       └── src/
 │           ├── index.ts        ← MCP server entry point
-│           ├── setup.ts        ← npx ccl registration logic
+│           ├── setup.ts        ← npx @sushilkulkarni1389/ccl-mcp registration logic
 │           └── commands/
 │               └── ccl.ts      ← ccl command handler
 ├── CONTRIBUTING.md

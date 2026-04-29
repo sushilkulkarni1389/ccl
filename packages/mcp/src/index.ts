@@ -112,7 +112,7 @@ export function buildLlmCall(
       if (e.status === 401) {
         throw new Error(
           "CCL_ERR_KEY_INVALID: Your ANTHROPIC_API_KEY is invalid or " +
-            "expired. Run: npx ccl --set-key <new-key>",
+            "expired. Run: npx @sushilkulkarni1389/ccl-mcp --set-key <new-key>",
         );
       }
       if (e.status === 403) {

@@ -33,7 +33,7 @@ The repo is a monorepo with two packages:
 | Package | What it contains |
 |---|---|
 | `packages/core` | Stack detection, scaffold planning, file writing, practices refresh |
-| `packages/mcp` | MCP server, `/ccl` command handler, `npx ccl` registration |
+| `packages/mcp` | MCP server, `/ccl` command handler, `npx @sushilkulkarni1389/ccl-mcp` registration |
 
 Build in dependency order: `core` first, then `mcp`.
 
@@ -49,7 +49,7 @@ Follow this order — each step is independently testable:
 4. `packages/core/src/practices.ts` — ccl-practices.json manager + refresh logic
 5. `packages/mcp/src/commands/ccl.ts` — `/ccl` command + conversation flow
 6. `packages/mcp/src/index.ts` — MCP server entry point
-7. `packages/mcp/src/setup.ts` — `npx ccl` registration logic
+7. `packages/mcp/src/setup.ts` — `npx @sushilkulkarni1389/ccl-mcp` registration logic
 8. Integration tests — full flow from `/ccl` to scaffolded project
 
 ---

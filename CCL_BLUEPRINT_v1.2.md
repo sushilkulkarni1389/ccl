@@ -55,7 +55,7 @@
 CCL (Claude Context Loader) is an MCP server that integrates directly into Claude Code. It scaffolds a complete, production-ready Claude Code project — including `CLAUDE.md`, skills, subagents, hooks, and configuration — using current best practices, automatically gathered and maintained via web search.
 
 **Core principles:**
-- Zero friction setup (`npx ccl` once, `/ccl` forever)
+- Zero friction setup (`npx @sushilkulkarni1389/ccl-mcp` once, `/ccl` forever)
 - Self-updating best practices (no manual maintenance)
 - Works like Claude Code itself — confirm once, execute, never nag
 - Never bloats `CLAUDE.md` — 200-line discipline enforced
@@ -67,7 +67,7 @@ CCL (Claude Context Loader) is an MCP server that integrates directly into Claud
 
 | Channel | Command | Status |
 |---|---|---|
-| MCP Server (primary) | `npx ccl` → `/ccl` | Phase 1 |
+| MCP Server (primary) | `npx @sushilkulkarni1389/ccl-mcp` → `/ccl` | Phase 1 |
 | Open Source Repo | GitHub (MIT License) | Phase 1 |
 
 **No web app. No CLI tool. Claude Code is the only interface.**
@@ -77,16 +77,16 @@ CCL (Claude Context Loader) is an MCP server that integrates directly into Claud
 ## 3. Setup — One Command
 
 ```bash
-npx ccl
+npx @sushilkulkarni1389/ccl-mcp
 ```
 
 | Command | What it does |
 |---|---|
-| `npx ccl` | Register CCL as an MCP server in Claude Code config |
-| `npx ccl --set-key <key>` | Store Anthropic API key in OS keychain |
-| `npx ccl --remove-key` | Delete key from OS keychain |
-| `npx ccl --list-key` | Print masked key + storage location, or "No key set." |
-| `npx ccl --help` | Show this table |
+| `npx @sushilkulkarni1389/ccl-mcp` | Register CCL as an MCP server in Claude Code config |
+| `npx @sushilkulkarni1389/ccl-mcp --set-key <key>` | Store Anthropic API key in OS keychain |
+| `npx @sushilkulkarni1389/ccl-mcp --remove-key` | Delete key from OS keychain |
+| `npx @sushilkulkarni1389/ccl-mcp --list-key` | Print masked key + storage location, or "No key set." |
+| `npx @sushilkulkarni1389/ccl-mcp --help` | Show this table |
 
 Only one key is active at a time. CCL does not route across multiple API accounts.
 
@@ -100,7 +100,7 @@ Only one key is active at a time. CCL does not route across multiple API account
 - Claude Code installed
 
 **Security:**
-- `npx ccl` only modifies Claude Code config — nothing else
+- `npx @sushilkulkarni1389/ccl-mcp` only modifies Claude Code config — nothing else
 - No global installs without consent
 - All file operations happen inside the user's project directory only
 - MCP server runs locally — no external calls except web search during best practices refresh
@@ -731,10 +731,10 @@ ccl/
 │   │   │   ├── detector.ts
 │   │   │   └── templates/
 │   │   └── package.json
-│   └── mcp/               ← MCP server + npx ccl setup
+│   └── mcp/               ← MCP server + npx @sushilkulkarni1389/ccl-mcp setup
 │       ├── src/
 │       │   ├── index.ts   ← MCP server entry point
-│       │   ├── setup.ts   ← npx ccl registration logic
+│       │   ├── setup.ts   ← npx @sushilkulkarni1389/ccl-mcp registration logic
 │       │   └── commands/
 │       │       └── ccl.ts ← /ccl command handler
 │       └── package.json
@@ -766,7 +766,7 @@ ccl/
 ## Quick Start
 
 1. Install CCL (one time only):
-   npx ccl
+   npx @sushilkulkarni1389/ccl-mcp
 
 2. Open Claude Code in your project directory
 
@@ -795,7 +795,7 @@ Build in this order — each phase is independently testable:
 4. **`packages/core/src/practices.ts`** — ccl-practices.json manager + refresh logic
 5. **`packages/mcp/src/commands/ccl.ts`** — `/ccl` command + full conversation flow
 6. **`packages/mcp/src/index.ts`** — MCP server entry point
-7. **`packages/mcp/src/setup.ts`** — `npx ccl` registration logic
+7. **`packages/mcp/src/setup.ts`** — `npx @sushilkulkarni1389/ccl-mcp` registration logic
 8. **Integration testing** — full flow from `/ccl` to scaffolded project
 
 ---
@@ -808,7 +808,7 @@ Build in this order — each phase is independently testable:
 cd packages/mcp && npm run build
 ```
 
-`npx ccl` executes the compiled `dist/` output, not the TypeScript
+`npx @sushilkulkarni1389/ccl-mcp` executes the compiled `dist/` output, not the TypeScript
 source directly. Changes to `src/setup.ts` or any other source file
 will not be reflected until the build step runs.
 
@@ -816,7 +816,7 @@ will not be reflected until the build step runs.
 
 ```bash
 grep -n "<your change>" packages/mcp/dist/setup.js
-npx ccl --help
+npx @sushilkulkarni1389/ccl-mcp --help
 ```
 
 **If npx serves a stale version despite a clean dist/:**
@@ -829,7 +829,7 @@ npx caches packages globally. If you are iterating on a locally
 linked version, clear this cache to force npx to pick up the
 latest build.
 
-**Config path detection:** `npx ccl` resolves the Claude config file via
+**Config path detection:** `npx @sushilkulkarni1389/ccl-mcp` resolves the Claude config file via
 `defaultConfigPath()` in setup.ts. It checks `~/.claude.json` first (flat file,
 used by Claude Code CLI on all platforms), then `~/.claude/claude.json`. The
 platform-specific desktop app paths (Application Support, APPDATA, XDG) are

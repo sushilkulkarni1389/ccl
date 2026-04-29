@@ -22,7 +22,7 @@ assignees: ''
 | Node.js version | <!-- node --version --> |
 | Claude Code version | <!-- claude --version --> |
 | OS | <!-- macOS 14 / Ubuntu 22.04 / etc --> |
-| CCL version | <!-- check package.json or npx ccl --version --> |
+| CCL version | <!-- check package.json or npx @sushilkulkarni1389/ccl-mcp --version --> |
 
 ## Project context
 

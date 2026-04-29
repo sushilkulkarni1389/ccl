@@ -123,7 +123,7 @@
   - **User-facing strings as top-of-file constants** (Phase 5 discipline maintained).
 
   ### ✅ Phase 7 — `packages/mcp/src/setup.ts`
-  `npx ccl` installation script (§3).
+  `npx @sushilkulkarni1389/ccl-mcp` installation script (§3).
 
   - **DI-first design:** `SetupOptions { configPath, exit, stdout, stderr, nodeVersion, serverDistPath }`. Production uses platform-specific defaults; tests inject tmpdir paths and capture stdout/stderr/exit code.
   - **Config path resolver (§3):** priority `~/.claude/claude.json` → platform-specific (`~/Library/Application Support/Claude/claude.json` on darwin, `%APPDATA%\Claude\claude.json` on win32, `$XDG_CONFIG_HOME/Claude/claude.json` on linux) → create `~/.claude/claude.json` if none exist.
@@ -329,7 +329,7 @@
           ├── tsconfig.json             (same strict profile as core)
           ├── src/
           │   ├── index.ts              (Phase 6 — MCP server entry; Fix B — scrubSecrets)
-          │   ├── setup.ts              (Phase 7 — npx ccl installer; Fix A — keychain storage)
+          │   ├── setup.ts              (Phase 7 — npx @sushilkulkarni1389/ccl-mcp installer; Fix A — keychain storage)
           │   └── commands/
           │       └── ccl.ts            (Phase 5 — conversation handler)
           └── test/

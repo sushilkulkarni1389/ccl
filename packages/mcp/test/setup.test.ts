@@ -865,7 +865,7 @@ describe("API key — --list-key", () => {
         `must lead with "No key set.": ${stdout[0]}`,
       );
       nodeAssert.ok(
-        stdout[0]!.includes("npx ccl --set-key"),
+        stdout[0]!.includes("npx @sushilkulkarni1389/ccl-mcp --set-key"),
         "must suggest the --set-key command",
       );
     } finally {

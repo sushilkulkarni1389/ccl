@@ -118,16 +118,16 @@ const PLAN_REVIEW_PROMPT_NO_LLM = `Type 'ok' to approve. (Plan changes need ANTH
 const MSG_NO_LLM_FOOTER =
   "\nℹ️  Skills scaffolded from static templates. " +
   "AI-enriched skill content and plan changes need ANTHROPIC_API_KEY.\n" +
-  "To enable: run  npx ccl --set-key sk-ant-...  then restart Claude Code.";
+  "To enable: run  npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...  then restart Claude Code.";
 
 const MSG_NO_LLM_CHANGE_REQUEST =
   "ℹ️  Plan changes require ANTHROPIC_API_KEY.\n\n" +
-  "To enable: run  npx ccl --set-key sk-ant-...  then restart Claude Code.\n\n" +
+  "To enable: run  npx @sushilkulkarni1389/ccl-mcp --set-key sk-ant-...  then restart Claude Code.\n\n" +
   "Type 'ok' to proceed with the plan as shown.";
 
 const MSG_KEY_INVALID =
   "⚠️  Your ANTHROPIC_API_KEY is invalid or expired.\n" +
-  "Run  npx ccl --set-key <new-key>  then restart Claude Code.\n\n" +
+  "Run  npx @sushilkulkarni1389/ccl-mcp --set-key <new-key>  then restart Claude Code.\n\n" +
   "You can still approve the current plan as shown.\n" +
   "Type 'ok' to proceed.";
 
@@ -146,7 +146,7 @@ const MSG_API_ERROR =
 
 const SKILL_GENERATION_FAILED_NOTE = (n: number): string =>
   `⚠️  ${n} skill(s) used static templates — LLM generation failed.\n` +
-  `Run  npx ccl --set-key <key>  and re-scaffold to regenerate.`;
+  `Run  npx @sushilkulkarni1389/ccl-mcp --set-key <key>  and re-scaffold to regenerate.`;
 
 const APPROVAL_PHRASES = [
   "ok",
